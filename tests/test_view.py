@@ -598,6 +598,12 @@ class TestView:
                 v1.select(v1.img2.width, v1.img2.height).order_by(v1.int1).collect(),
                 t.select(t.img.width - t.int1, t.img.height - t.int1).order_by(t.int1).collect(),
             )
+            r1 = v2.select(v2.int1, v2.img3.width, v2.img3.height).order_by(v2.int1).collect(),
+            r2 = (
+                v1.select(v1.int1, v1.img2.width - v1.int1 - v1.int2, v1.img2.height - v1.int3 - v1.int4)
+                .where(v1.int1 < 10)
+                .order_by(v1.int1)
+                .collect())
             assert_resultset_eq(
                 v2.select(v2.img3.width, v2.img3.height).order_by(v2.int1).collect(),
                 v1.select(v1.img2.width - v1.int1 - v1.int2, v1.img2.height - v1.int3 - v1.int4)
@@ -811,6 +817,8 @@ class TestView:
         assert set(view_s._schema.keys()) == set(orig_view_cols)
 
         def check(s1: pxt.Table, v: pxt.Table, s2: pxt.Table) -> None:
+            r1 = s1.where(s1.c2 < 10).count()
+            r2 = v.count()
             assert s1.where(s1.c2 < 10).count() == v.count()
             assert v.count() == s2.count()
             assert_resultset_eq(

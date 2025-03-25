@@ -624,6 +624,9 @@ class TestTable:
 
         # compare img and img_literal
         # TODO: make tbl.select(tbl.img == tbl.img_literal) work
+        r1 = tbl.where(tbl.img.localpath == sample_rows[0]['img']).collect()
+        status = tbl.update({'category': 'other'}, where=(tbl.img.localpath == sample_rows[0]['img']))
+        r1 = tbl.where(tbl.img.localpath == sample_rows[0]['img']).collect()
         tdf = tbl.select(tbl.img, tbl.img_literal).show()
         pdf = tdf.to_pandas()
         for tup in pdf.itertuples():
@@ -986,6 +989,7 @@ class TestTable:
         # TODO: investigate why
         # FileCache.get().clear()  # make sure we need to download the files
         validate_update_status(tbl.insert({'video': uri} for uri in uris), expected_rows=len(uris))
+        _ = tbl.select(tbl.video.fileurl, tbl.video.localpath).collect()
         row = tbl.select(tbl.video.fileurl, tbl.video.localpath).head(1)[0]
         assert row['video_fileurl'] == uris[0]
         # tbl.video.localpath contains valid path to an mp4 file
@@ -1226,7 +1230,7 @@ class TestTable:
             # some rows are missing rowids
             _ = t2.batch_update([{'c1': 'one', '_rowid': (1,)}, {'c1': 'two'}])
 
-    def test_update(self, test_tbl: pxt.Table, small_img_tbl: pxt.Table) -> None:
+    def test_update(self, test_tbl: pxt.Table) -> None:
         t = test_tbl
         # update every type with a literal
         test_cases = [
@@ -1335,12 +1339,17 @@ class TestTable:
             t.update({'c3': 1.0}, where=lambda c2: c2 == 10)  # type: ignore[arg-type]
         assert 'predicate' in str(excinfo.value)
 
+    def test_non_sql_update(self, small_img_tbl: pxt.Table) -> None:
         img_t = small_img_tbl
 
-        # filter not expressible in SQL
-        with pytest.raises(excs.Error) as excinfo:
-            img_t.update({'split': 'train'}, where=img_t.img.width > 100)
-        assert 'not expressible' in str(excinfo.value)
+        # non-SQL filters
+        localpath = img_t.select(path=img_t.img.localpath).head(1)[0]['path']
+        status = img_t.update({'category': 'other'}, where=img_t.img.localpath == localpath)
+        assert status.num_rows == 1
+        assert img_t.where(img_t.category == 'other').count() == 1
+        status = img_t.update({'split': 'train'}, where=img_t.img.width < 200)
+        num_matching = len(img_t.where(img_t.img.width < 200).collect())
+        assert status.num_rows == num_matching
 
     def test_cascading_update(self, test_tbl: pxt.InsertableTable) -> None:
         t = test_tbl

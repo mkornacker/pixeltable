@@ -392,8 +392,8 @@ class StoreBase:
         self,
         current_version: int,
         base_versions: list[Optional[int]],
-        match_on_vmin: bool,
         where_clause: Optional[sql.ColumnElement[bool]],
+        for_update: bool,
     ) -> int:
         """Mark rows as deleted that are live and were created prior to current_version.
         Also: populate the undo columns
@@ -406,27 +406,44 @@ class StoreBase:
         Returns:
             number of deleted rows
         """
-        where_clause = sql.true() if where_clause is None else where_clause
-        where_clause = sql.and_(
-            self.v_min_col < current_version, self.v_max_col == schema.Table.MAX_VERSION, where_clause
-        )
-        rowid_join_clause = self._rowid_join_predicate()
-        base_versions_clause = (
-            sql.true() if len(base_versions) == 0 else self.base._versions_clause(base_versions, match_on_vmin)
-        )
         set_clause: dict[sql.Column, Union[int, sql.Column]] = {self.v_max_col: current_version}
         for index_info in self.tbl_version.get().idxs_by_name.values():
             # copy value column to undo column
             set_clause[index_info.undo_col.sa_col] = index_info.val_col.sa_col
             # set value column to NULL
             set_clause[index_info.val_col.sa_col] = None
-        stmt = (
-            sql.update(self.sa_tbl)
-            .values(set_clause)
-            .where(where_clause)
-            .where(rowid_join_clause)
-            .where(base_versions_clause)
-        )
+
+        stmt = sql.update(self.sa_tbl).values(set_clause)
+
+        if for_update:
+            # subquery: rowids of newly-written rows
+            subquery = sql.select(*self.rowid_columns()).where(self.v_min_col == current_version).scalar_subquery()
+            # we mark the rows for which we just inserted new rows as deleted
+            where_clause = sql.and_(
+                sql.tuple_(*self.rowid_columns()).in_(subquery),
+                self.v_min_col < current_version,
+                self.v_max_col == schema.Table.MAX_VERSION,
+            )
+            stmt = stmt.where(where_clause)
+        else:
+            where_clause = sql.true() if where_clause is None else where_clause
+            where_clause = sql.and_(
+                self.v_min_col < current_version,
+                self.v_max_col == schema.Table.MAX_VERSION,
+                where_clause
+            )
+
+            rowid_join_clause = self._rowid_join_predicate()
+            base_versions_clause = (
+                sql.true() if len(base_versions) == 0 else self.base._versions_clause(base_versions, False)
+            )
+
+            stmt = (
+                stmt.where(where_clause)
+                .where(rowid_join_clause)
+                .where(base_versions_clause)
+            )
+
         conn = Env.get().conn
         log_explain(_logger, stmt, conn)
         status = conn.execute(stmt)

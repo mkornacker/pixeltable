@@ -891,10 +891,6 @@ class TableVersion:
         if where is not None:
             if not isinstance(where, exprs.Expr):
                 raise excs.Error(f"'where' argument must be a predicate, got {type(where)}")
-            analysis_info = Planner.analyze(self.path, where)
-            # for now we require that the updated rows can be identified via SQL, rather than via a Python filter
-            if analysis_info.filter is not None:
-                raise excs.Error(f'Filter {analysis_info.filter} not expressible in SQL')
 
         plan, updated_cols, recomputed_cols = Planner.create_update_plan(self.path, update_spec, [], where, cascade)
         from pixeltable.exprs import SqlElementCache
@@ -1015,7 +1011,7 @@ class TableVersion:
             )
             result.cols_with_excs = [f'{self.name}.{self.cols_by_id[cid].name}' for cid in cols_with_excs]
             self.store_tbl.delete_rows(
-                self.version, base_versions=base_versions, match_on_vmin=True, where_clause=where_clause
+                self.version, base_versions=base_versions, where_clause=None, for_update=True
             )
             self._update_md(timestamp)
 
@@ -1074,7 +1070,7 @@ class TableVersion:
         """
         sql_where_clause = where.sql_expr(exprs.SqlElementCache()) if where is not None else None
         num_rows = self.store_tbl.delete_rows(
-            self.version + 1, base_versions=base_versions, match_on_vmin=False, where_clause=sql_where_clause
+            self.version + 1, base_versions=base_versions, where_clause=sql_where_clause, for_update=False
         )
         if num_rows > 0:
             # we're creating a new version
