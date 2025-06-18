@@ -21,6 +21,19 @@ class Videos(pxt.Model):
     audio_extract = pxtf.video.extract_audio(M.video)
 
 
+# alternatively
+class Videos(pxt.Model):
+    __tablename__ = 'videos'
+
+    video: pxt.Video
+    audio_extract = lambda video: pxtf.video.extract_audio(video)
+
+
+class SampleApp(pxt.Model):
+    some_input: str
+    audio_extract_output: Videos(video=some_input)
+
+
 class AudioChunks(pxt.ViewModel):
     __tablename__ = 'audio_chunks'
     __base__ = pxti.AudioSplitter(
