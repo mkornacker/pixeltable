@@ -3,6 +3,7 @@ from typing import AnyStr
 import mcp_server.config
 
 import pixeltable as pxt
+from pixeltable import M
 import pixeltable.functions as pxtf
 import pixeltable.iterators as pxti
 
@@ -19,6 +20,14 @@ class Videos(pxt.Model):
 
     video: pxt.Video
     audio_extract = pxtf.video.extract_audio(M.video)
+
+
+# alternatively
+class Videos(pxt.Model):
+    __tablename__ = 'videos'
+
+    video: pxt.Video
+    audio_extract = pxtf.video.extract_audio(pxt.Column('video'))
 
 
 # alternatively
