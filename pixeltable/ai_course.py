@@ -30,7 +30,7 @@ class AudioChunks(pxt.ViewModel):
     )
 
     transcription = pxtf.whisper.transcribe(audio=M.audio_chunk, model='base.en')
-    chunk_text = M.transcript.text
+    chunk_text = M.transcription.text
 
     class Meta:
         indexes = [
@@ -38,6 +38,13 @@ class AudioChunks(pxt.ViewModel):
                 M.chunk_text, string_embed=pxtf.huggingface.sentence_transformer.using(model_id=settings.MODEL_ID)
             )
         ]
+
+    # alternatively:
+    __indexes__ = [
+        pxt.EmbeddingIndex(
+            M.chunk_text, string_embed=pxtf.huggingface.sentence_transformer.using(model_id=settings.MODEL_ID)
+        )
+    ]
 
 
 @pxtf.udf
