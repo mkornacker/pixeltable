@@ -3,7 +3,7 @@ from typing import AnyStr
 import mcp_server.config
 
 import pixeltable as pxt
-from pixeltable import M
+from pixeltable import Column
 import pixeltable.functions as pxtf
 import pixeltable.iterators as pxti
 
@@ -19,52 +19,25 @@ class Videos(pxt.Model):
     __tablename__ = 'videos'
 
     video: pxt.Video
-    audio_extract = pxtf.video.extract_audio(M.video)
-
-
-# alternatively
-class Videos(pxt.Model):
-    __tablename__ = 'videos'
-
-    video: pxt.Video
-    audio_extract = pxtf.video.extract_audio(pxt.Column('video'))
-
-
-# alternatively
-class Videos(pxt.Model):
-    __tablename__ = 'videos'
-
-    video: pxt.Video
-    audio_extract = lambda video: pxtf.video.extract_audio(video)
-
-
-class SampleApp(pxt.Model):
-    some_input: str
-    audio_extract_output: Videos(video=some_input)
+    # we're referencing the 'video' column as Column.video, not Videos.video, because Videos doesn't exist yet
+    audio_extract = pxtf.video.extract_audio(Column.video)
 
 
 class AudioChunks(pxt.ViewModel):
     __tablename__ = 'audio_chunks'
+
     __base__ = pxti.AudioSplitter(
         audio=Videos.audio_extract,
         chunk_duration_sec=settings.CHUNK_DURATION,
         overlap_sec=settings.AUDIO_OVERLAP_SECONDS,
     )
 
-    transcription = pxtf.whisper.transcribe(audio=M.audio_chunk, model='base.en')
-    chunk_text = M.transcription.text
+    transcription = pxtf.whisper.transcribe(audio=Column.audio_chunk, model='base.en')
+    chunk_text = Column.transcription.text
 
-    class Meta:
-        indexes = [
-            pxt.EmbeddingIndex(
-                M.chunk_text, string_embed=pxtf.huggingface.sentence_transformer.using(model_id=settings.MODEL_ID)
-            )
-        ]
-
-    # alternatively:
     __indexes__ = [
         pxt.EmbeddingIndex(
-            M.chunk_text, string_embed=pxtf.huggingface.sentence_transformer.using(model_id=settings.MODEL_ID)
+            Column.chunk_text, string_embed=pxtf.huggingface.sentence_transformer.using(model_id=settings.MODEL_ID)
         )
     ]
 
@@ -88,19 +61,19 @@ async def get_caption(prompt: str, im_str: str) -> str:
 
 class VideoChunks(pxt.ViewModel):
     __tablename__ = 'video_chunks'
+
     __base__ = pxti.FrameIterator(video=Videos.video, fps=settings.VIDEO_FPS)
 
-    im_caption = get_caption(settings.CAPTION_MODEL_PROMPT, im_str=M.frame.b64_encode(image_format='jpeg'))
+    im_caption = get_caption(settings.CAPTION_MODEL_PROMPT, im_str=Column.frame.b64_encode(image_format='jpeg'))
 
-    class Meta:
-        indexes = [
-            pxt.EmbeddingIndex(
-                M.frame, image_embed=pxtf.huggingface.clip.using(model_id=settings.IMAGE_SIMILARITY_EMBD_MODEL)
-            ),
-            pxt.EmbeddingIndex(
-                M.im_caption, string_embed=pxtf.huggingface.clip.using(model_id=settings.CAPTION_SIMILARITY_EMBD_MODEL)
-            ),
-        ]
+    __indexes__ = [
+        pxt.EmbeddingIndex(
+            Column.frame, image_embed=pxtf.huggingface.clip.using(model_id=settings.IMAGE_SIMILARITY_EMBD_MODEL)
+        ),
+        pxt.EmbeddingIndex(
+            Column.im_caption, string_embed=pxtf.huggingface.clip.using(model_id=settings.CAPTION_SIMILARITY_EMBD_MODEL)
+        ),
+    ]
 
 
 #########################################
