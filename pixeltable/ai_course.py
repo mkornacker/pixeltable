@@ -15,27 +15,33 @@ settings = mcp_server.config.get_settings()
 #########################################
 
 
+# Define a table for videos (with columns 'video' and 'audio_extract').
+# The class variables define the table columns, similar to SQLAlchemy.
+# Class variables starting with 'pxt_' are reserved and function as keywords.
 class Videos(pxt.Model):
-    __tablename__ = 'videos'
+    pxt_tablename = 'videos'
 
     video: pxt.Video
     # we're referencing the 'video' column as Column.video, not Videos.video, because Videos doesn't exist yet
-    audio_extract = pxtf.video.extract_audio(Column.video)
+    audio_extract = pxtf.video.extract_audio(Column.video)  # type: pxt.Audio
 
 
-class AudioChunks(pxt.ViewModel):
-    __tablename__ = 'audio_chunks'
+# A view defined with a Pixeltable iterator class (such as AudioSplitter and FrameIterator) contains one row
+# per element returned by the iterator.
+class AudioChunks(pxt.Model):
+    pxt_tablename = 'audio_chunks'
 
-    __base__ = pxti.AudioSplitter(
+    # The AudioSplitter iterator is used to split the extracted audio into fixed-size chunks.
+    pxt_view = pxti.AudioSplitter(
         audio=Videos.audio_extract,
         chunk_duration_sec=settings.CHUNK_DURATION,
         overlap_sec=settings.AUDIO_OVERLAP_SECONDS,
     )
 
-    transcription = pxtf.whisper.transcribe(audio=Column.audio_chunk, model='base.en')
+    transcription = pxtf.whisper.transcribe(audio=Column.audio_chunk, model='base.en')  # type: pxt.Json
     chunk_text = Column.transcription.text
 
-    __indexes__ = [
+    pxt_indexes = [
         pxt.EmbeddingIndex(
             Column.chunk_text, string_embed=pxtf.huggingface.sentence_transformer.using(model_id=settings.MODEL_ID)
         )
@@ -59,14 +65,16 @@ async def get_caption(prompt: str, im_str: str) -> str:
     return chat_completion.choices[0].message.content
 
 
-class VideoChunks(pxt.ViewModel):
-    __tablename__ = 'video_chunks'
+class VideoChunks(pxt.Model):
+    pxt_tablename = 'video_chunks'
 
-    __base__ = pxti.FrameIterator(video=Videos.video, fps=settings.VIDEO_FPS)
+    # The FrameIterator is used to create a frame view of the videos, with one frame per row, and frames extracted
+    # at the specified frames-per-second rate.
+    pxt_view = pxti.FrameIterator(video=Videos.video, fps=settings.VIDEO_FPS)
 
     im_caption = get_caption(settings.CAPTION_MODEL_PROMPT, im_str=Column.frame.b64_encode(image_format='jpeg'))
 
-    __indexes__ = [
+    pxt_indexes = [
         pxt.EmbeddingIndex(
             Column.frame, image_embed=pxtf.huggingface.clip.using(model_id=settings.IMAGE_SIMILARITY_EMBD_MODEL)
         ),
