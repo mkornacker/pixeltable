@@ -354,9 +354,9 @@ class DocumentSplitter(ComponentIterator):
 
     def _pdf_sections(self) -> Iterator[DocumentSection]:
         """Create DocumentSections reflecting the pdf-specific separators"""
-        import fitz  # type: ignore[import-untyped]
+        import pypdfium2  # type: ignore[import-untyped]
 
-        doc: fitz.Document = self._doc_handle.pdf_doc
+        doc: pypdfium2.PdfDocument = self._doc_handle.pdf_doc
         assert doc is not None
 
         emit_on_paragraph = Separator.PARAGRAPH in self._separators or Separator.SENTENCE in self._separators
@@ -374,16 +374,63 @@ class DocumentSplitter(ComponentIterator):
             accumulated_text.clear()
             return full_text
 
-        for page_number, page in enumerate(doc.pages()):
-            for block in page.get_text('blocks'):
-                # there is no concept of paragraph in pdf, block is the closest thing
-                # we can get (eg a paragraph in text may cut across pages)
-                # see pymupdf docs https://pymupdf.readthedocs.io/en/latest/app1.html
-                # other libraries like pdfminer also lack an explicit paragraph concept
-                x1, y1, x2, y2, text, _, _ = block
-                _add_cleaned_text(text)
+        for page_number in range(len(doc)):
+            page = doc[page_number]
+            textpage = page.get_textpage()
+
+            # Extract text with bounding boxes by analyzing character positions
+            # This is needed because pypdfium2 doesn't provide block-level extraction like PyMuPDF
+            char_count = textpage.count_chars()
+            if char_count == 0:
+                continue
+
+            # Collect characters with their bounding boxes
+            chars_data: list[dict[str, Any]] = []
+            for char_idx in range(char_count):
+                left, bottom, right, top = textpage.get_charbox(char_idx)
+                char = textpage.get_text_range(char_idx, 1)
+                chars_data.append({'char': char, 'left': left, 'bottom': bottom, 'right': right, 'top': top})
+
+            # Group characters into blocks based on vertical separation
+            # Calculate median character height for adaptive thresholding
+            char_heights: list[float] = [c['top'] - c['bottom'] for c in chars_data if c['top'] > c['bottom']]
+            if char_heights:
+                char_heights.sort()
+                median_height = char_heights[len(char_heights) // 2]
+                # Threshold: 1.5x median height indicates a new block/paragraph
+                vertical_threshold = median_height * 1.5
+            else:
+                vertical_threshold = 5.0  # Fallback
+
+            # Build blocks
+            blocks: list[list[dict[str, Any]]] = []
+            current_block: list[dict[str, Any]] = []
+            prev_bottom: Optional[float] = None
+
+            for char_data in chars_data:
+                # Check for vertical gap indicating new block
+                if prev_bottom is not None and abs(char_data['bottom'] - prev_bottom) > vertical_threshold:
+                    if current_block:
+                        blocks.append(current_block)
+                        current_block = []
+
+                current_block.append(char_data)
+                prev_bottom = char_data['bottom']
+
+            if current_block:
+                blocks.append(current_block)
+
+            # Process blocks
+            for block in blocks:
+                block_text = ''.join(c['char'] for c in block)
+                min_left = min(c['left'] for c in block)
+                min_bottom = min(c['bottom'] for c in block)
+                max_right = max(c['right'] for c in block)
+                max_top = max(c['top'] for c in block)
+
+                _add_cleaned_text(block_text)
                 if accumulated_text and emit_on_paragraph:
-                    bbox = {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2}
+                    bbox = {'x1': min_left, 'y1': min_bottom, 'x2': max_right, 'y2': max_top}
                     metadata = DocumentSectionMetadata(page=page_number, bounding_box=bbox)
                     yield DocumentSection(text=_emit_text(), metadata=metadata)
 

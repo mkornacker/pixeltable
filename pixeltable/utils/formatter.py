@@ -232,16 +232,19 @@ class Formatter:
         """
         if file_path.lower().endswith('.pdf'):
             try:
-                import fitz  # type: ignore[import-untyped]
+                import pypdfium2  # type: ignore[import-untyped]
 
-                doc = fitz.open(file_path)
-                pixmap = doc.get_page_pixmap(0)
-                while pixmap.width > max_width or pixmap.height > max_height:
-                    # shrink(1) will halve each dimension
-                    pixmap.shrink(1)
-                return pixmap.pil_image()
+                doc = pypdfium2.PdfDocument(file_path)
+                page = doc[0]
+                pil_image = page.render(scale=1).to_pil()
+
+                # Resize if the image exceeds max dimensions
+                if pil_image.width > max_width or pil_image.height > max_height:
+                    pil_image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+
+                return pil_image
             except Exception:
-                logging.warning(f'Failed to produce PDF thumbnail {file_path}. Make sure you have PyMuPDF installed.')
+                logging.warning(f'Failed to produce PDF thumbnail {file_path}. Make sure you have pypdfium2 installed.')
 
         return None
 

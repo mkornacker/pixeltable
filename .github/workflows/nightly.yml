@@ -43,7 +43,7 @@ jobs:
           - "pyarrow sentence-transformers sentencepiece soundfile torch torchaudio torchvision transformers"
           - "anthropic fireworks-ai google-genai groq mistralai openai replicate together"
           - "huggingface-hub llama-cpp-python openai-whisper"
-          - "datasets boto3 openpyxl tiktoken pymupdf mistune spacy"
+          - "datasets boto3 openpyxl tiktoken pypdfium2 mistune spacy"
           - "label_studio_sdk"
           - "pixeltable-yolox"
         os: [ubuntu-22.04]

@@ -3,8 +3,8 @@ import os
 from typing import Optional
 
 import bs4
-import fitz  # type: ignore[import-untyped]
 import puremagic
+import pypdfium2  # type: ignore[import-untyped]
 
 from pixeltable import exceptions as excs, type_system as ts
 from pixeltable.env import Env
@@ -15,7 +15,7 @@ class DocumentHandle:
     format: ts.DocumentType.DocumentFormat
     bs_doc: Optional[bs4.BeautifulSoup] = None
     md_ast: Optional[dict] = None
-    pdf_doc: Optional[fitz.Document] = None
+    pdf_doc: Optional[pypdfium2.PdfDocument] = None
     txt_doc: Optional[str] = None
 
 
@@ -72,14 +72,16 @@ def get_markdown_handle(path: str) -> dict:
     return md_ast(text)
 
 
-def get_pdf_handle(path: str) -> fitz.Document:
-    doc = fitz.open(path)
-    # check pdf (bc it will work for images)
-    if not doc.is_pdf:
-        raise excs.Error(f'Not a valid PDF document: {path}')
-    # try to read one page
-    next(page for page in doc)
-    return doc
+def get_pdf_handle(path: str) -> pypdfium2.PdfDocument:
+    try:
+        doc = pypdfium2.PdfDocument(path)
+        # try to read one page to validate
+        if len(doc) == 0:
+            raise excs.Error(f'Not a valid PDF document: {path}')
+        _ = doc[0]  # Access first page to ensure it's readable
+        return doc
+    except Exception as e:
+        raise excs.Error(f'Not a valid PDF document: {path}') from e
 
 
 def get_xml_handle(path: str) -> bs4.BeautifulSoup:
