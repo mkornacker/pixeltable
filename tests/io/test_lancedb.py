@@ -62,15 +62,28 @@ class TestLanceDb:
         t.insert(rows)
 
     def test_y(self, reset_db: None) -> None:
-        """Baseline benchmark: insert same data using SQLAlchemy directly."""
-        n_rows = 100_000
+        """Baseline benchmark: insert same data using SQLAlchemy directly.
 
-        # Create SQLAlchemy table definition
+        Mimics Pixeltable's table structure including:
+        - System columns: rowid, v_min, v_max
+        - Composite btree index on system columns (rowid, v_min)
+        - BRIN indices on v_min and v_max (as Pixeltable uses for PostgreSQL)
+        - Btree indices on scalar user columns (Pixeltable's default behavior)
+        """
+        n_rows = 100_000
+        max_version = 9223372036854775807  # Pixeltable's MAX_VERSION
+
+        # Create SQLAlchemy table definition with system columns
         metadata = sql.MetaData()
         test_table = sql.Table(
             'test_sqlalchemy_insert',
             metadata,
-            sql.Column('row_id', sql.BigInteger, primary_key=True),
+            # System columns (like Pixeltable)
+            sql.Column('rowid', sql.BigInteger, nullable=False),
+            sql.Column('v_min', sql.BigInteger, nullable=False),
+            sql.Column('v_max', sql.BigInteger, nullable=False, server_default=str(max_version)),
+            # User columns
+            sql.Column('row_id', sql.BigInteger),
             sql.Column('c_int', sql.BigInteger),
             sql.Column('c_float', sql.Float),
             sql.Column('c_bool', sql.Boolean),
@@ -78,6 +91,22 @@ class TestLanceDb:
             sql.Column('c_timestamp', sql.TIMESTAMP(timezone=True)),
             sql.Column('c_date', sql.Date),
             sql.Column('c_json', JSONB),
+            # Primary key on rowid + v_min (like Pixeltable)
+            sql.PrimaryKeyConstraint('rowid', 'v_min'),
+            # Composite btree index on system columns (speeds up joins and ORDER BY)
+            sql.Index('sys_cols_idx', 'rowid', 'v_min', 'v_max'),
+            # BRIN indices on v_min and v_max (like Pixeltable uses for PostgreSQL)
+            sql.Index('vmin_idx', 'v_min', postgresql_using='brin'),
+            sql.Index('vmax_idx', 'v_max', postgresql_using='brin'),
+            # Btree indices on scalar user columns (Pixeltable creates these by default)
+            # Note: c_bool is not indexed (btrees on bools aren't useful)
+            # Note: c_json is not indexed (not a scalar type)
+            sql.Index('idx_row_id', 'row_id', postgresql_using='btree'),
+            sql.Index('idx_c_int', 'c_int', postgresql_using='btree'),
+            sql.Index('idx_c_float', 'c_float', postgresql_using='btree'),
+            sql.Index('idx_c_string', 'c_string', postgresql_using='btree'),
+            sql.Index('idx_c_timestamp', 'c_timestamp', postgresql_using='btree'),
+            sql.Index('idx_c_date', 'c_date', postgresql_using='btree'),
         )
 
         engine = Env.get().engine
@@ -86,11 +115,17 @@ class TestLanceDb:
         test_table.drop(engine, checkfirst=True)
         test_table.create(engine)
 
-        # Generate same row data as test_x
+        # Generate same row data as test_x, plus system column values
         now = datetime.datetime.now()
         today = datetime.date.today()
+        v_min = 1  # Version at which rows are created
         rows = [
             {
+                # System columns
+                'rowid': i,
+                'v_min': v_min,
+                'v_max': max_version,
+                # User columns (same as test_x)
                 'row_id': i,
                 'c_int': i + 1 if i % 10 != 0 else None,
                 'c_float': i * 10.0,
