@@ -1,5 +1,6 @@
 import datetime
 import io
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import PIL.Image
+import pyarrow as pa
 import pytest
 import sqlalchemy as sql
 from sqlalchemy.dialects.postgresql import JSONB
@@ -145,6 +147,263 @@ class TestLanceDb:
         elapsed = time.perf_counter() - start
 
         print(f'\nSQLAlchemy direct insert: {n_rows} rows in {elapsed:.2f}s ({n_rows/elapsed:.2f} rows/s)')
+
+        # Clean up
+        test_table.drop(engine, checkfirst=True)
+
+    def test_w(self, reset_db: None) -> None:
+        """Baseline benchmark: ADBC with staging table for JSONB support.
+
+        Uses ADBC's fast COPY-based adbc_ingest() into a staging table (TEXT for JSON),
+        then copies to target table with JSONB conversion via INSERT...SELECT.
+        """
+        import adbc_driver_postgresql.dbapi
+
+        n_rows = 100_000
+        max_version = 9223372036854775807  # Pixeltable's MAX_VERSION
+
+        # Target table with JSONB column (same as test_y)
+        metadata = sql.MetaData()
+        table_name = 'test_adbc_target'
+        staging_name = 'test_adbc_staging'
+
+        target_table = sql.Table(
+            table_name,
+            metadata,
+            sql.Column('rowid', sql.BigInteger, nullable=False),
+            sql.Column('v_min', sql.BigInteger, nullable=False),
+            sql.Column('v_max', sql.BigInteger, nullable=False, server_default=str(max_version)),
+            sql.Column('row_id', sql.BigInteger),
+            sql.Column('c_int', sql.BigInteger),
+            sql.Column('c_float', sql.Float),
+            sql.Column('c_bool', sql.Boolean),
+            sql.Column('c_string', sql.String),
+            sql.Column('c_timestamp', sql.TIMESTAMP(timezone=True)),
+            sql.Column('c_date', sql.Date),
+            sql.Column('c_json', JSONB),
+            sql.PrimaryKeyConstraint('rowid', 'v_min'),
+            sql.Index('sys_cols_idx_w', 'rowid', 'v_min', 'v_max'),
+            sql.Index('vmin_idx_w', 'v_min', postgresql_using='brin'),
+            sql.Index('vmax_idx_w', 'v_max', postgresql_using='brin'),
+            sql.Index('idx_row_id_w', 'row_id', postgresql_using='btree'),
+            sql.Index('idx_c_int_w', 'c_int', postgresql_using='btree'),
+            sql.Index('idx_c_float_w', 'c_float', postgresql_using='btree'),
+            sql.Index('idx_c_string_w', 'c_string', postgresql_using='btree'),
+            sql.Index('idx_c_timestamp_w', 'c_timestamp', postgresql_using='btree'),
+            sql.Index('idx_c_date_w', 'c_date', postgresql_using='btree'),
+        )
+
+        # Staging table with TEXT for JSON (no indices needed)
+        staging_table = sql.Table(
+            staging_name,
+            metadata,
+            sql.Column('rowid', sql.BigInteger, nullable=False),
+            sql.Column('v_min', sql.BigInteger, nullable=False),
+            sql.Column('v_max', sql.BigInteger, nullable=False),
+            sql.Column('row_id', sql.BigInteger),
+            sql.Column('c_int', sql.BigInteger),
+            sql.Column('c_float', sql.Float),
+            sql.Column('c_bool', sql.Boolean),
+            sql.Column('c_string', sql.String),
+            sql.Column('c_timestamp', sql.TIMESTAMP(timezone=True)),
+            sql.Column('c_date', sql.Date),
+            sql.Column('c_json', sql.Text),  # TEXT for ADBC COPY compatibility
+        )
+
+        engine = Env.get().engine
+
+        # Create tables
+        target_table.drop(engine, checkfirst=True)
+        staging_table.drop(engine, checkfirst=True)
+        target_table.create(engine)
+        staging_table.create(engine)
+
+        # Generate data as columnar arrays for PyArrow
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        today = datetime.date.today()
+        v_min = 1
+
+        rowids = list(range(n_rows))
+        v_mins = [v_min] * n_rows
+        v_maxs = [max_version] * n_rows
+        row_ids = list(range(n_rows))
+        c_ints = [i + 1 if i % 10 != 0 else None for i in range(n_rows)]
+        c_floats = [i * 10.0 for i in range(n_rows)]
+        c_bools = [bool(i % 2) for i in range(n_rows)]
+        c_strings = [f'string_{i}' for i in range(n_rows)]
+        c_timestamps = [now - datetime.timedelta(seconds=i) for i in range(n_rows)]
+        c_dates = [today - datetime.timedelta(days=i) for i in range(n_rows)]
+        c_jsons = [json.dumps({'key': i, 'value': f'val_{i}', 'nested': {'data': i * 2}}) for i in range(n_rows)]
+
+        arrow_table = pa.table({
+            'rowid': pa.array(rowids, type=pa.int64()),
+            'v_min': pa.array(v_mins, type=pa.int64()),
+            'v_max': pa.array(v_maxs, type=pa.int64()),
+            'row_id': pa.array(row_ids, type=pa.int64()),
+            'c_int': pa.array(c_ints, type=pa.int64()),
+            'c_float': pa.array(c_floats, type=pa.float64()),
+            'c_bool': pa.array(c_bools, type=pa.bool_()),
+            'c_string': pa.array(c_strings, type=pa.string()),
+            'c_timestamp': pa.array(c_timestamps, type=pa.timestamp('us', tz='UTC')),
+            'c_date': pa.array(c_dates, type=pa.date32()),
+            'c_json': pa.array(c_jsons, type=pa.string()),  # TEXT for staging
+        })
+
+        # Build ADBC connection URI
+        url = engine.url
+        if url.query.get('host'):
+            import urllib.parse
+            host = urllib.parse.unquote(url.query['host'])
+            uri = f'postgresql://{url.username}@/{url.database}?host={host}'
+        else:
+            uri = f'postgresql://{url.username}@{url.host}:{url.port}/{url.database}'
+
+        # Insert using ADBC into staging table, then copy to target with JSONB cast
+        start = time.perf_counter()
+
+        # Step 1: Fast COPY into staging table via ADBC
+        with adbc_driver_postgresql.dbapi.connect(uri) as conn:
+            with conn.cursor() as cur:
+                cur.adbc_ingest(staging_name, arrow_table, mode='append')
+            conn.commit()
+
+        # Step 2: Copy from staging to target with JSONB conversion
+        with engine.begin() as conn:
+            cols = ', '.join(c.name for c in staging_table.c if c.name != 'c_json')
+            conn.execute(sql.text(
+                f'INSERT INTO {table_name} ({cols}, c_json) '
+                f'SELECT {cols}, c_json::jsonb FROM {staging_name}'
+            ))
+
+        elapsed = time.perf_counter() - start
+
+        print(f'\nADBC staging + copy: {n_rows} rows in {elapsed:.2f}s ({n_rows/elapsed:.2f} rows/s)')
+
+        # Clean up
+        staging_table.drop(engine, checkfirst=True)
+        target_table.drop(engine, checkfirst=True)
+
+    def test_z(self, reset_db: None) -> None:
+        """Baseline benchmark: insert using ADBC (Arrow Database Connectivity).
+
+        Uses PyArrow tables for efficient bulk ingestion via ADBC protocol.
+        Table structure matches test_y() for fair comparison.
+        """
+        import adbc_driver_postgresql.dbapi
+
+        n_rows = 100_000
+        max_version = 9223372036854775807  # Pixeltable's MAX_VERSION
+
+        # Create SQLAlchemy table definition with system columns (same as test_y)
+        metadata = sql.MetaData()
+        table_name = 'test_adbc_insert'
+        test_table = sql.Table(
+            table_name,
+            metadata,
+            # System columns (like Pixeltable)
+            sql.Column('rowid', sql.BigInteger, nullable=False),
+            sql.Column('v_min', sql.BigInteger, nullable=False),
+            sql.Column('v_max', sql.BigInteger, nullable=False, server_default=str(max_version)),
+            # User columns
+            sql.Column('row_id', sql.BigInteger),
+            sql.Column('c_int', sql.BigInteger),
+            sql.Column('c_float', sql.Float),
+            sql.Column('c_bool', sql.Boolean),
+            sql.Column('c_string', sql.String),
+            sql.Column('c_timestamp', sql.TIMESTAMP(timezone=True)),
+            sql.Column('c_date', sql.Date),
+            sql.Column('c_json', JSONB),
+            # Primary key on rowid + v_min (like Pixeltable)
+            sql.PrimaryKeyConstraint('rowid', 'v_min'),
+            # Composite btree index on system columns
+            sql.Index('sys_cols_idx_z', 'rowid', 'v_min', 'v_max'),
+            # BRIN indices on v_min and v_max
+            sql.Index('vmin_idx_z', 'v_min', postgresql_using='brin'),
+            sql.Index('vmax_idx_z', 'v_max', postgresql_using='brin'),
+            # Btree indices on scalar user columns
+            sql.Index('idx_row_id_z', 'row_id', postgresql_using='btree'),
+            sql.Index('idx_c_int_z', 'c_int', postgresql_using='btree'),
+            sql.Index('idx_c_float_z', 'c_float', postgresql_using='btree'),
+            sql.Index('idx_c_string_z', 'c_string', postgresql_using='btree'),
+            sql.Index('idx_c_timestamp_z', 'c_timestamp', postgresql_using='btree'),
+            sql.Index('idx_c_date_z', 'c_date', postgresql_using='btree'),
+        )
+
+        engine = Env.get().engine
+
+        # Drop table if exists and create new one with indices
+        test_table.drop(engine, checkfirst=True)
+        test_table.create(engine)
+
+        # Generate data as columnar arrays for PyArrow
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        today = datetime.date.today()
+        v_min = 1
+
+        # Build column arrays
+        rowids = list(range(n_rows))
+        v_mins = [v_min] * n_rows
+        v_maxs = [max_version] * n_rows
+        row_ids = list(range(n_rows))
+        c_ints = [i + 1 if i % 10 != 0 else None for i in range(n_rows)]
+        c_floats = [i * 10.0 for i in range(n_rows)]
+        c_bools = [bool(i % 2) for i in range(n_rows)]
+        c_strings = [f'string_{i}' for i in range(n_rows)]
+        c_timestamps = [now - datetime.timedelta(seconds=i) for i in range(n_rows)]
+        c_dates = [today - datetime.timedelta(days=i) for i in range(n_rows)]
+        c_jsons = [json.dumps({'key': i, 'value': f'val_{i}', 'nested': {'data': i * 2}}) for i in range(n_rows)]
+
+        # Create PyArrow table
+        arrow_table = pa.table({
+            'rowid': pa.array(rowids, type=pa.int64()),
+            'v_min': pa.array(v_mins, type=pa.int64()),
+            'v_max': pa.array(v_maxs, type=pa.int64()),
+            'row_id': pa.array(row_ids, type=pa.int64()),
+            'c_int': pa.array(c_ints, type=pa.int64()),
+            'c_float': pa.array(c_floats, type=pa.float64()),
+            'c_bool': pa.array(c_bools, type=pa.bool_()),
+            'c_string': pa.array(c_strings, type=pa.string()),
+            'c_timestamp': pa.array(c_timestamps, type=pa.timestamp('us', tz='UTC')),
+            'c_date': pa.array(c_dates, type=pa.date32()),
+            'c_json': pa.array(c_jsons, type=pa.json_(pa.utf8())),
+        })
+
+        # Build ADBC connection URI from engine URL components
+        # ADBC doesn't support all SQLAlchemy URL options (like timezone)
+        url = engine.url
+        # For Unix socket connections, use host parameter
+        if url.query.get('host'):
+            import urllib.parse
+            host = urllib.parse.unquote(url.query['host'])
+            uri = f'postgresql://{url.username}@/{url.database}?host={host}'
+        else:
+            uri = f'postgresql://{url.username}@{url.host}:{url.port}/{url.database}'
+
+        # Insert using ADBC with executemany (adbc_ingest uses COPY which doesn't handle JSONB)
+        # Rename columns to $1, $2, ... for PostgreSQL bind parameter syntax
+        col_names = arrow_table.column_names
+        bind_batch = pa.record_batch(
+            [arrow_table.column(col).combine_chunks() for col in col_names],
+            names=[f'${i+1}' for i in range(len(col_names))]
+        )
+
+        # Build INSERT statement with explicit cast for JSONB column
+        placeholders = []
+        for i, col in enumerate(col_names):
+            if col == 'c_json':
+                placeholders.append(f'${i+1}::jsonb')
+            else:
+                placeholders.append(f'${i+1}')
+        insert_sql = f"INSERT INTO {table_name} ({', '.join(col_names)}) VALUES ({', '.join(placeholders)})"
+
+        start = time.perf_counter()
+        with adbc_driver_postgresql.dbapi.connect(uri) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(insert_sql, bind_batch)
+            conn.commit()
+        elapsed = time.perf_counter() - start
+
+        print(f'\nADBC direct insert: {n_rows} rows in {elapsed:.2f}s ({n_rows/elapsed:.2f} rows/s)')
 
         # Clean up
         test_table.drop(engine, checkfirst=True)
