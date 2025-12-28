@@ -156,6 +156,23 @@ class TestLanceDb:
 
         Uses ADBC's fast COPY-based adbc_ingest() into a staging table (TEXT for JSON),
         then copies to target table with JSONB conversion via INSERT...SELECT.
+
+        Performance findings (1M rows, 140 MB):
+
+        Batch Size |  Total (s) |  Ingest (s) |   Copy (s) |       Rows/s
+        ------------------------------------------------------------------------
+            10,000 |       6.63 |        0.99 |       5.63 |      150,893
+            25,000 |       6.37 |        0.87 |       5.50 |      156,960
+            50,000 |       6.38 |        0.87 |       5.50 |      156,846
+           100,000 |       6.38 |        0.89 |       5.49 |      156,674
+           250,000 |       6.39 |        0.92 |       5.47 |      156,525
+           500,000 |       6.43 |        0.93 |       5.50 |      155,606
+         1,000,000 |       6.41 |        0.93 |       5.48 |      156,101
+
+        Key observations:
+        - ADBC ingest is very fast: ~0.9s for 1M rows (~1.1M rows/s)
+        - The bottleneck is INSERT...SELECT with JSONB cast: ~5.5s (85% of total time)
+        - Batch size has minimal impact on performance
         """
         import adbc_driver_postgresql.dbapi
 
@@ -291,7 +308,7 @@ class TestLanceDb:
         """
         import adbc_driver_postgresql.dbapi
 
-        n_rows = 100_000
+        n_rows = 1000_000
         max_version = 9223372036854775807  # Pixeltable's MAX_VERSION
 
         # Create SQLAlchemy table definition with system columns (same as test_y)
