@@ -17,6 +17,7 @@ from pixeltable.exec import ExecNode
 from pixeltable.metadata import schema
 from pixeltable.utils.exception_handler import run_cleanup
 from pixeltable.utils.sql import log_explain, log_stmt
+from pixeltable.utils.timing import timed
 
 _logger = logging.getLogger('pixeltable')
 
@@ -408,67 +409,73 @@ class StoreBase:
         Returns:
             number of inserted rows, number of exceptions, set of column ids that have exceptions
         """
-        assert v_min is not None
-        # TODO: total?
-        num_excs = 0
-        num_rows = 0
-        cols_with_excs: set[int] = set()
-        row_builder = exec_plan.row_builder
+        with timed('store.insert_rows.total'):
+            assert v_min is not None
+            # TODO: total?
+            num_excs = 0
+            num_rows = 0
+            cols_with_excs: set[int] = set()
+            row_builder = exec_plan.row_builder
 
-        store_col_names = row_builder.store_column_names()
+            store_col_names = row_builder.store_column_names()
 
-        table_rows: list[tuple[Any]] = []
+            table_rows: list[tuple[Any]] = []
 
-        with exec_plan:
-            progress_reporter = (
-                exec_plan.ctx.add_progress_reporter(f'Rows written (table {self.tbl_version.get().name!r})', 'rows')
-                if exec_plan.ctx.show_progress
-                else None
-            )
+            with exec_plan:
+                progress_reporter = (
+                    exec_plan.ctx.add_progress_reporter(f'Rows written (table {self.tbl_version.get().name!r})', 'rows')
+                    if exec_plan.ctx.show_progress
+                    else None
+                )
 
-            for row_batch in exec_plan:
-                num_rows += len(row_batch)
-                batch_table_rows: list[tuple[Any]] = []
+                with timed('store.insert_rows.exec_plan_iter'):
+                    for row_batch in exec_plan:
+                        num_rows += len(row_batch)
+                        batch_table_rows: list[tuple[Any]] = []
 
-                # compute batch of rows and convert them into table rows
-                for row in row_batch:
-                    # if abort_on_exc == True, we need to check for media validation exceptions
-                    if abort_on_exc and row.has_exc():
-                        exc = row.get_first_exc()
-                        raise exc
+                        # compute batch of rows and convert them into table rows
+                        for row in row_batch:
+                            # if abort_on_exc == True, we need to check for media validation exceptions
+                            if abort_on_exc and row.has_exc():
+                                exc = row.get_first_exc()
+                                raise exc
 
-                    rowid = (next(rowids),) if rowids is not None else row.pk[:-1]
-                    pk = (*rowid, v_min)
-                    assert len(pk) == len(self._pk_cols)
-                    table_row, num_row_exc = row_builder.create_store_table_row(row, cols_with_excs, pk)
-                    num_excs += num_row_exc
+                            rowid = (next(rowids),) if rowids is not None else row.pk[:-1]
+                            pk = (*rowid, v_min)
+                            assert len(pk) == len(self._pk_cols)
+                            with timed('store.insert_rows.create_store_row'):
+                                table_row, num_row_exc = row_builder.create_store_table_row(row, cols_with_excs, pk)
+                            num_excs += num_row_exc
 
-                    batch_table_rows.append(tuple(table_row))
+                            batch_table_rows.append(tuple(table_row))
 
-                table_rows.extend(batch_table_rows)
+                        table_rows.extend(batch_table_rows)
 
-                # if a batch is ready for insertion into the database, insert it
-                if len(table_rows) >= self.__INSERT_BATCH_SIZE:
+                        # if a batch is ready for insertion into the database, insert it
+                        if len(table_rows) >= self.__INSERT_BATCH_SIZE:
+                            self.sql_insert(self.sa_tbl, store_col_names, table_rows)
+                            if progress_reporter is not None:
+                                progress_reporter.update(len(table_rows))
+                            table_rows.clear()
+
+                # insert any remaining rows
+                if len(table_rows) > 0:
                     self.sql_insert(self.sa_tbl, store_col_names, table_rows)
                     if progress_reporter is not None:
                         progress_reporter.update(len(table_rows))
-                    table_rows.clear()
 
-            # insert any remaining rows
-            if len(table_rows) > 0:
-                self.sql_insert(self.sa_tbl, store_col_names, table_rows)
-                if progress_reporter is not None:
-                    progress_reporter.update(len(table_rows))
+                row_counts = RowCountStats(ins_rows=num_rows, num_excs=num_excs, computed_values=0)
 
-            row_counts = RowCountStats(ins_rows=num_rows, num_excs=num_excs, computed_values=0)
-
-            return cols_with_excs, row_counts
+                return cols_with_excs, row_counts
 
     @classmethod
     def sql_insert(cls, sa_tbl: sql.Table, store_col_names: list[str], table_rows: list[tuple[Any]]) -> None:
         assert len(table_rows) > 0
         conn = Env.get().conn
-        conn.execute(sql.insert(sa_tbl), [dict(zip(store_col_names, table_row)) for table_row in table_rows])
+        with timed('store.sql_insert.dict_zip'):
+            rows_as_dicts = [dict(zip(store_col_names, table_row)) for table_row in table_rows]
+        with timed('store.sql_insert.execute'):
+            conn.execute(sql.insert(sa_tbl), rows_as_dicts)
 
         # TODO: Inserting directly via psycopg delivers a small performance benefit, but is somewhat fraught due to
         #     differences in the data representation that SQLAlchemy/psycopg expect. The below code will do the

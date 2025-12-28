@@ -23,6 +23,7 @@ from pixeltable.iterators import ComponentIterator
 from pixeltable.metadata import schema
 from pixeltable.utils.filecache import FileCache
 from pixeltable.utils.object_stores import ObjectOps
+from pixeltable.utils.timing import timed
 
 from ..func.globals import resolve_symbol
 from .column import Column
@@ -1019,11 +1020,12 @@ class TableVersion:
 
         assert self.is_insertable
         assert (rows is None) != (query is None)  # Exactly one must be specified
-        if rows is not None:
-            plan = Planner.create_insert_plan(self, rows, ignore_errors=not fail_on_exception)
+        with timed('table_version.insert.create_plan'):
+            if rows is not None:
+                plan = Planner.create_insert_plan(self, rows, ignore_errors=not fail_on_exception)
 
-        else:
-            plan = Planner.create_query_insert_plan(self, query, ignore_errors=not fail_on_exception)
+            else:
+                plan = Planner.create_query_insert_plan(self, query, ignore_errors=not fail_on_exception)
 
         # this is a base table; we generate rowids during the insert
         def rowids() -> Iterator[int]:
@@ -1049,7 +1051,8 @@ class TableVersion:
     ) -> UpdateStatus:
         """Insert rows produced by exec_plan and propagate to views"""
         # we're creating a new version
-        self.bump_version(timestamp, bump_schema_version=False)
+        with timed('table_version._insert.bump_version'):
+            self.bump_version(timestamp, bump_schema_version=False)
         exec_plan.ctx.title = self.display_str()
         cols_with_excs, row_counts = self.store_tbl.insert_rows(
             exec_plan, v_min=self.version, rowids=rowids, abort_on_exc=abort_on_exc
@@ -1069,7 +1072,8 @@ class TableVersion:
 
         # Use the net status after all propagations
         self.update_status = result
-        self._write_md(new_version=True, new_schema_version=False)
+        with timed('table_version._insert.write_md'):
+            self._write_md(new_version=True, new_schema_version=False)
         if print_stats:
             exec_plan.ctx.profile.print(num_rows=result.num_rows)
         _logger.info(f'TableVersion {self.name}: new version {self.version}')

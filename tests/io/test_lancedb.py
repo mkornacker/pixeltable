@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 import pixeltable as pxt
 from pixeltable.env import Env
+from pixeltable.utils import timing
 
 from ..utils import skip_test_if_not_installed
 
@@ -28,6 +29,7 @@ def udf_with_exc(i: int, val: int) -> int:
 
 class TestLanceDb:
     def test_x(self, reset_db: None, tmp_path: Path) -> None:
+        """Pixeltable insert benchmark with timing instrumentation."""
         skip_test_if_not_installed('lancedb')
         import lancedb  # type: ignore[import-untyped]
 
@@ -54,14 +56,26 @@ class TestLanceDb:
                 'c_bool': bool(i % 2),
                 'c_string': f'string_{i}',
                 'c_timestamp': datetime.datetime.now() - datetime.timedelta(seconds=i),
-                'c_date': datetime.date.today() - datetime.timedelta(days=i),
+                'c_date': datetime.date.today() - datetime.timedelta(days=i % 365),
                 'c_json': {'key': i, 'value': f'val_{i}', 'nested': {'data': i * 2}},
                 #'c_array': np.array([i] * 10, dtype=np.float32),
                 #'c_image': PIL.Image.new('RGB', (100, 100), color=(i % 256, (i * 2) % 256, (i * 3) % 256)),
             }
             for i in range(n_rows)
         ]
+
+        # Enable timing instrumentation
+        timing.reset()
+        timing.enable()
+
+        start = time.perf_counter()
         t.insert(rows)
+        elapsed = time.perf_counter() - start
+
+        timing.disable()
+
+        print(f'\nPixeltable insert: {elapsed:.2f}s ({n_rows / elapsed:.0f} rows/s)')
+        timing.report()
 
     def test_y(self, reset_db: None) -> None:
         """Baseline benchmark: insert same data using SQLAlchemy directly.

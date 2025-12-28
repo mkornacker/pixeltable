@@ -3,6 +3,7 @@ from typing import Any, AsyncIterator
 
 from pixeltable import catalog, exprs
 from pixeltable.utils.local_store import TempStore
+from pixeltable.utils.timing import timed
 
 from .data_row_batch import DataRowBatch
 from .exec_node import ExecNode
@@ -46,41 +47,45 @@ class InMemoryDataNode(ExecNode):
 
     def _open(self) -> None:
         """Create row batch and populate with self.input_rows"""
-        user_cols_by_name = {
-            col_ref.col.name: exprs.ColumnSlotIdx(col_ref.col, col_ref.slot_idx)
-            for col_ref in self.output_exprs
-            if col_ref.col.name is not None
-        }
-        output_cols_by_idx = {
-            col_ref.slot_idx: exprs.ColumnSlotIdx(col_ref.col, col_ref.slot_idx) for col_ref in self.output_exprs
-        }
-        output_slot_idxs = {e.slot_idx for e in self.output_exprs}
+        with timed('in_memory_data_node._open.total'):
+            user_cols_by_name = {
+                col_ref.col.name: exprs.ColumnSlotIdx(col_ref.col, col_ref.slot_idx)
+                for col_ref in self.output_exprs
+                if col_ref.col.name is not None
+            }
+            output_cols_by_idx = {
+                col_ref.slot_idx: exprs.ColumnSlotIdx(col_ref.col, col_ref.slot_idx) for col_ref in self.output_exprs
+            }
+            output_slot_idxs = {e.slot_idx for e in self.output_exprs}
 
-        self.output_batch = DataRowBatch(self.row_builder)
-        for input_row in self.input_rows:
-            output_row = self.row_builder.make_row()
-            # populate the output row with the values provided in the input row
-            input_slot_idxs: set[int] = set()
-            for col_name, val in input_row.items():
-                col_info = user_cols_by_name.get(col_name)
-                assert col_info is not None
-                col = col_info.col
-                if col.col_type.is_image_type() and isinstance(val, bytes):
-                    # this is a literal media file, ie, a sequence of bytes; save it as a binary file and store the path
-                    filepath, _ = TempStore.save_media_object(val, col, format=None)
-                    output_row[col_info.slot_idx] = str(filepath)
-                else:
-                    output_row[col_info.slot_idx] = val
+            self.output_batch = DataRowBatch(self.row_builder)
+            for input_row in self.input_rows:
+                with timed('in_memory_data_node._open.make_row'):
+                    output_row = self.row_builder.make_row()
+                # populate the output row with the values provided in the input row
+                input_slot_idxs: set[int] = set()
+                with timed('in_memory_data_node._open.populate_row'):
+                    for col_name, val in input_row.items():
+                        col_info = user_cols_by_name.get(col_name)
+                        assert col_info is not None
+                        col = col_info.col
+                        if col.col_type.is_image_type() and isinstance(val, bytes):
+                            # this is a literal media file, ie, a sequence of bytes; save it as a binary file and store the path
+                            filepath, _ = TempStore.save_media_object(val, col, format=None)
+                            output_row[col_info.slot_idx] = str(filepath)
+                        else:
+                            output_row[col_info.slot_idx] = val
 
-                input_slot_idxs.add(col_info.slot_idx)
+                        input_slot_idxs.add(col_info.slot_idx)
 
-            # set the remaining output slots to their default values (presently None)
-            missing_slot_idxs = output_slot_idxs - input_slot_idxs
-            for slot_idx in missing_slot_idxs:
-                col_info = output_cols_by_idx.get(slot_idx)
-                assert col_info is not None
-                output_row[col_info.slot_idx] = None
-            self.output_batch.add_row(output_row)
+                # set the remaining output slots to their default values (presently None)
+                missing_slot_idxs = output_slot_idxs - input_slot_idxs
+                for slot_idx in missing_slot_idxs:
+                    col_info = output_cols_by_idx.get(slot_idx)
+                    assert col_info is not None
+                    output_row[col_info.slot_idx] = None
+                with timed('in_memory_data_node._open.add_row'):
+                    self.output_batch.add_row(output_row)
 
     async def __aiter__(self) -> AsyncIterator[DataRowBatch]:
         _logger.debug(f'InMemoryDataNode: created row batch with {len(self.output_batch)} rows')
