@@ -1,5 +1,6 @@
 import datetime
 import io
+import time
 from pathlib import Path
 from typing import Any
 
@@ -7,8 +8,11 @@ import numpy as np
 import pandas as pd
 import PIL.Image
 import pytest
+import sqlalchemy as sql
+from sqlalchemy.dialects.postgresql import JSONB
 
 import pixeltable as pxt
+from pixeltable.env import Env
 
 from ..utils import skip_test_if_not_installed
 
@@ -21,6 +25,95 @@ def udf_with_exc(i: int, val: int) -> int:
 
 
 class TestLanceDb:
+    def test_x(self, reset_db: None, tmp_path: Path) -> None:
+        skip_test_if_not_installed('lancedb')
+        import lancedb  # type: ignore[import-untyped]
+
+        n_rows = 100_000
+        schema = {
+            'row_id': pxt.Int,
+            'c_int': pxt.Int,
+            'c_float': pxt.Float,
+            'c_bool': pxt.Bool,
+            'c_string': pxt.String,
+            'c_timestamp': pxt.Timestamp,
+            'c_date': pxt.Date,
+            'c_json': pxt.Json,
+            #'c_array': pxt.Array[(10,), pxt.Float],  # type: ignore[misc]
+            #'c_image': pxt.Image,
+        }
+        t = pxt.create_table('test_export', schema)
+
+        rows = [
+            {
+                'row_id': i,
+                'c_int': i + 1 if i % 10 != 0 else None,
+                'c_float': i * 10.0,
+                'c_bool': bool(i % 2),
+                'c_string': f'string_{i}',
+                'c_timestamp': datetime.datetime.now() - datetime.timedelta(seconds=i),
+                'c_date': datetime.date.today() - datetime.timedelta(days=i),
+                'c_json': {'key': i, 'value': f'val_{i}', 'nested': {'data': i * 2}},
+                #'c_array': np.array([i] * 10, dtype=np.float32),
+                #'c_image': PIL.Image.new('RGB', (100, 100), color=(i % 256, (i * 2) % 256, (i * 3) % 256)),
+            }
+            for i in range(n_rows)
+        ]
+        t.insert(rows)
+
+    def test_y(self, reset_db: None) -> None:
+        """Baseline benchmark: insert same data using SQLAlchemy directly."""
+        n_rows = 100_000
+
+        # Create SQLAlchemy table definition
+        metadata = sql.MetaData()
+        test_table = sql.Table(
+            'test_sqlalchemy_insert',
+            metadata,
+            sql.Column('row_id', sql.BigInteger, primary_key=True),
+            sql.Column('c_int', sql.BigInteger),
+            sql.Column('c_float', sql.Float),
+            sql.Column('c_bool', sql.Boolean),
+            sql.Column('c_string', sql.String),
+            sql.Column('c_timestamp', sql.TIMESTAMP(timezone=True)),
+            sql.Column('c_date', sql.Date),
+            sql.Column('c_json', JSONB),
+        )
+
+        engine = Env.get().engine
+
+        # Drop table if exists and create new one
+        test_table.drop(engine, checkfirst=True)
+        test_table.create(engine)
+
+        # Generate same row data as test_x
+        now = datetime.datetime.now()
+        today = datetime.date.today()
+        rows = [
+            {
+                'row_id': i,
+                'c_int': i + 1 if i % 10 != 0 else None,
+                'c_float': i * 10.0,
+                'c_bool': bool(i % 2),
+                'c_string': f'string_{i}',
+                'c_timestamp': now - datetime.timedelta(seconds=i),
+                'c_date': today - datetime.timedelta(days=i),
+                'c_json': {'key': i, 'value': f'val_{i}', 'nested': {'data': i * 2}},
+            }
+            for i in range(n_rows)
+        ]
+
+        # Insert using SQLAlchemy
+        start = time.perf_counter()
+        with engine.begin() as conn:
+            conn.execute(sql.insert(test_table), rows)
+        elapsed = time.perf_counter() - start
+
+        print(f'\nSQLAlchemy direct insert: {n_rows} rows in {elapsed:.2f}s ({n_rows/elapsed:.2f} rows/s)')
+
+        # Clean up
+        test_table.drop(engine, checkfirst=True)
+
     def test_export(self, reset_db: None, tmp_path: Path) -> None:
         skip_test_if_not_installed('lancedb')
         import lancedb  # type: ignore[import-untyped]
