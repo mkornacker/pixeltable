@@ -187,3 +187,64 @@ class TestSql:
         t3.insert([{'c_int': {'key': 'value'}}])
         with pytest.raises(pxt.Error, match=r"column 'c_int' of type INTEGER is not compatible"):
             export_sql(t3, 'existing_table', db_connect_str=connection_string, if_exists='insert')
+
+
+    def test_export_snowflake(self, reset_db: None) -> None:
+        """Test Snowflake export including JSON columns.
+
+        Requires environment variables:
+        - SNOWFLAKE_ACCOUNT: e.g., 'WEZMMGC-AIB20064'
+        - SNOWFLAKE_USER: e.g., 'PBRUNELLE'
+        - SNOWFLAKE_PASSWORD: your password
+        - SNOWFLAKE_WAREHOUSE: e.g., 'COMPUTE_WH'
+        - SNOWFLAKE_DATABASE: e.g., 'PIXELTABLE_TEST'
+        - SNOWFLAKE_SCHEMA: e.g., 'PUBLIC'
+        """
+        account = 'WEZMMGC-AIB20064'
+        user = 'PBRUNELLE'
+        password = 'Jacobien25031492'
+        warehouse = 'COMPUTE_WH'
+        database = 'PIXELTABLE_TEST'
+        schema = 'PUBLIC'
+
+        connection_string = (
+            f'snowflake://{user}:{password}@{account}/{database}/{schema}'
+            f'?warehouse={warehouse}'
+        )
+        engine = sql.create_engine(connection_string)
+
+        # Create table with JSON column
+        t = pxt.create_table(
+            'test_snowflake',
+            {
+                'c_int': pxt.Int,
+                'c_string': pxt.String,
+                'c_json': pxt.Json,
+            },
+        )
+        rows = [
+            {'c_int': 1, 'c_string': 'row_1', 'c_json': {'key': 'value1', 'nested': {'data': 1}}},
+            {'c_int': 2, 'c_string': 'row_2', 'c_json': {'key': 'value2', 'nested': {'data': 2}}},
+            {'c_int': 3, 'c_string': 'row_3', 'c_json': {'key': 'value3', 'nested': {'data': 3}}},
+        ]
+        t.insert(rows)
+
+        # Export to Snowflake
+        export_sql(t, 'test_table', db_connect_str=connection_string, if_exists='replace')
+
+        # Verify the data
+        with engine.connect() as conn:
+            result = conn.execute(sql.text('SELECT * FROM test_table ORDER BY c_int')).fetchall()
+            assert len(result) == len(rows)
+
+            for i, row in enumerate(result):
+                assert row[0] == rows[i]['c_int']
+                assert row[1] == rows[i]['c_string']
+                # Snowflake returns VARIANT as dict or needs JSON parsing
+                json_val = row[2] if isinstance(row[2], dict) else json.loads(row[2])
+                assert json_val == rows[i]['c_json']
+
+        # Cleanup
+        with engine.connect() as conn:
+            conn.execute(sql.text('DROP TABLE IF EXISTS test_table'))
+            conn.commit()
