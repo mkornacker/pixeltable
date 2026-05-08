@@ -53,6 +53,7 @@ def _build_select(
         is_media = info['media_validation'] is not None
         is_computed = info['is_computed']
         is_stored = info['is_stored']
+        is_iterator_col = info['is_iterator_col']
         columns.append(
             {
                 'name': col_name,
@@ -60,6 +61,7 @@ def _build_select(
                 'is_media': is_media,
                 'is_computed': is_computed,
                 'is_stored': is_stored,
+                'is_iterator_col': is_iterator_col,
                 'is_sorted': col_name in sorted_cols,
             }
         )

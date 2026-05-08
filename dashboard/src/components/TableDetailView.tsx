@@ -19,7 +19,7 @@ import {
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ChevronUp, ChevronDown,
   ImageIcon, Film, Music, FileText,
   Rows3, Table2, Filter, X, Search,
-  RefreshCw, Zap, Key, Download,
+  RefreshCw, Zap, Key, Download, SquareFunction,
   Info, Eye, Copy,
   GitBranch, ArrowRight, ExternalLink,
   AlertTriangle, Clock,
@@ -848,8 +848,10 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
     (key: SchemaColKey) => setColWidths(w => ({ ...w, [key]: SCHEMA_COL_DEFAULTS[key] })),
     [],
   )
-  const sourceCount = columns.filter(c => !c.is_computed).length
-  const computedCount = columns.filter(c => c.is_computed).length
+  const isDerived = (c: ColumnInfo) => c.is_computed || c.is_iterator_col
+  const mutableCount = columns.filter(c => !isDerived(c)).length
+  const computedCount = columns.filter(isDerived).length
+  const computedStoredCount = columns.filter(c => isDerived(c) && c.is_stored).length
   const showFilter = columns.length >= SCHEMA_FILTER_THRESHOLD
 
   const filtered = useMemo(() => {
@@ -870,13 +872,15 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
             Columns
           </span>
         </button>
-        <span className="text-[11px] text-muted-foreground tabular-nums">{columns.length}</span>
+        <span className="text-[11px] text-muted-foreground tabular-nums">{columns.length} columns</span>
         <span className="text-[11px] text-muted-foreground/60">·</span>
-        <span className="text-[11px] text-muted-foreground tabular-nums">{sourceCount} stored</span>
+        <span className="text-[11px] text-muted-foreground tabular-nums">{mutableCount} mutable</span>
         {computedCount > 0 && (
           <>
             <span className="text-[11px] text-muted-foreground/60">·</span>
-            <span className="text-[11px] text-muted-foreground tabular-nums">{computedCount} computed</span>
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              {computedCount} computed ({computedStoredCount} stored)
+            </span>
           </>
         )}
         {showFilter && (
@@ -979,7 +983,15 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
                     <td className="py-1.5 px-2 overflow-hidden" title={col.name}>
                       <div className="flex items-center gap-1.5">
                         {col.is_primary_key && <Key className="h-3 w-3 text-k-yellow shrink-0" />}
-                        {col.is_computed && <Zap className="h-3 w-3 text-k-yellow/60 shrink-0" />}
+                        {col.is_iterator_col && (
+                          <KindBadge kind="iterator" className="h-3 w-3 text-muted-foreground" />
+                        )}
+                        {col.is_computed && (
+                          <SquareFunction
+                            className={cn('h-3 w-3 text-muted-foreground shrink-0', !col.is_stored && 'opacity-50')}
+                            aria-label={col.is_stored ? 'computed' : 'computed on demand (not stored)'}
+                          />
+                        )}
                         <span className="font-mono font-medium text-foreground truncate">{col.name}</span>
                       </div>
                     </td>
@@ -1125,7 +1137,7 @@ function SdkSnippet({ metadata }: { metadata: TableMetadata }) {
   )
 }
 
-function TableHeader({ metadata, versions, rowCount, onTableClick }: { metadata: TableMetadata; versions: PipelineVersion[]; rowCount: number | null; onTableClick: (path: string) => void }) {
+function TableHeader({ metadata, versions, rowCount }: { metadata: TableMetadata; versions: PipelineVersion[]; rowCount: number | null }) {
   const [showSnippet, setShowSnippet] = useState(false)
   const kind = metadata.kind
   const columnCount = Object.keys(metadata.columns).length
@@ -1180,33 +1192,9 @@ function TableHeader({ metadata, versions, rowCount, onTableClick }: { metadata:
           {'</>'}
         </button>
       </div>
-      <div className="flex items-center gap-1.5 ml-6.5 mt-0.5 text-[11px] font-mono flex-wrap">
-        {metadata.path.split('/').slice(0, -1).map((seg, i) => (
-          <span key={i} className="flex items-center gap-1.5">
-            <span className="text-muted-foreground/50">{seg}</span>
-            <ArrowRight className="h-2.5 w-2.5 text-muted-foreground/30 shrink-0" />
-          </span>
-        ))}
-        {metadata.base ? (
-          <>
-            <button className="text-k-yellow hover:underline" onClick={() => onTableClick(metadata.base!)}>
-              {metadata.base.split('/').pop()}
-            </button>
-            <ArrowRight className="h-2.5 w-2.5 text-muted-foreground/30 shrink-0" />
-            <span className="text-foreground font-medium">{metadata.name}</span>
-          </>
-        ) : (
-          <span className="text-foreground">{metadata.name}</span>
-        )}
-        {metadata.comment && (
-          <span className="text-muted-foreground/60 font-sans ml-1">— {metadata.comment}</span>
-        )}
-        {metadata.iterator_call && (
-          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-violet-400/10 text-violet-400 font-medium border border-violet-400/20">
-            {metadata.iterator_call}
-          </span>
-        )}
-      </div>
+      {metadata.comment && (
+        <div className="ml-6.5 mt-0.5 text-[11px] text-muted-foreground/60">— {metadata.comment}</div>
+      )}
       {showSnippet && <SdkSnippet metadata={metadata} />}
     </div>
   )
@@ -1647,7 +1635,6 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
             metadata={metadata}
             versions={node?.versions ?? []}
             rowCount={node?.row_count ?? null}
-            onTableClick={(path) => navigate(`/table/${path}`)}
           />
         )
       })()}
@@ -1944,9 +1931,17 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
                           title={sortable ? undefined : (col.is_stored ? 'Not indexed - cannot sort' : 'Unstored - cannot sort')}
                         >
                         <div className="flex items-center gap-1">
-                          <ColumnTypeIcon type={col.type} className="h-3 w-3" />
+                          {col.is_iterator_col && (
+                            <KindBadge kind="iterator" className="h-3 w-3 text-muted-foreground" />
+                          )}
+                          {col.is_computed && (
+                            <SquareFunction
+                              className={cn('h-3 w-3 text-muted-foreground shrink-0', !col.is_stored && 'opacity-50')}
+                              aria-label={col.is_stored ? 'computed' : 'computed on demand (not stored)'}
+                            />
+                          )}
                           {col.name}
-                          {orderBy === col.name && (orderDesc ? <ChevronDown className="h-3 w-3 text-k-yellow" /> : <ChevronUp className="h-3 w-3 text-k-yellow" />)}
+                          {orderBy === col.name && (orderDesc ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronUp className="h-3 w-3 text-muted-foreground" />)}
                         </div>
                         </th>
                       )
