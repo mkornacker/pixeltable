@@ -826,8 +826,8 @@ function ColResizeHandle({ atMin, getStartWidth, onResize, onReset }: {
   )
 }
 
-function ColumnChips({ columns, indices, expanded, onToggle }: {
-  columns: ColumnInfo[]; indices: IndexInfo[]; expanded: boolean; onToggle: () => void
+function ColumnChips({ columns, indices, tableMediaValidation, expanded, onToggle }: {
+  columns: ColumnInfo[]; indices: IndexInfo[]; tableMediaValidation: 'on_read' | 'on_write'; expanded: boolean; onToggle: () => void
 }) {
   const [filter, setFilter] = useState('')
   const [expandedExpr, setExpandedExpr] = useState<string | null>(null)
@@ -1019,34 +1019,18 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
                       )}
                     </td>
                     <td className="py-1.5 px-2 text-[11px] text-muted-foreground">
-                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                        <span className="tabular-nums">v{col.version_added}</span>
-                        {col.is_iterator_col && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-medium">iterator</span>
+                      <div className="flex flex-col gap-y-0.5">
+                        {col.comment && (
+                          <span className="italic" title={col.comment}>{col.comment}</span>
                         )}
-                        {!col.is_stored && col.is_computed && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-medium" title="Computed on demand, not stored">dynamic</span>
+                        {col.media_validation && col.media_validation !== tableMediaValidation && (
+                          <span>media validation: {col.media_validation.replace(/_/g, ' ')}</span>
                         )}
-                        {col.media_validation && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-medium" title={`Media validated ${col.media_validation}`}>{col.media_validation}</span>
+                        {col.is_computed && !col.is_stored && (
+                          <span>stored: False</span>
                         )}
                         {col.destination && (
-                          <span
-                            className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-mono font-medium truncate max-w-[200px]"
-                            title={col.destination}
-                          >
-                            → {col.destination}
-                          </span>
-                        )}
-                        {col.comment && (
-                          <span className="text-muted-foreground italic" title={col.comment}>
-                            {col.comment.length > 40 ? col.comment.slice(0, 40) + '…' : col.comment}
-                          </span>
-                        )}
-                        {col.custom_metadata != null && (
-                          <span className="text-muted-foreground" title={JSON.stringify(col.custom_metadata)}>
-                            [meta]
-                          </span>
+                          <span className="font-mono truncate" title={col.destination}>destination: {col.destination}</span>
                         )}
                       </div>
                     </td>
@@ -1161,24 +1145,18 @@ function TableHeader({ metadata, versions, rowCount }: { metadata: TableMetadata
         <KindBadge kind={kind} className="h-4 w-4 text-muted-foreground" />
         <h2 className="text-sm font-semibold text-foreground">{metadata.name}</h2>
         <span className="text-xs font-mono text-muted-foreground">(/{metadata.path})</span>
-        {(() => {
-          const embeddingIdxCount = Object.values(metadata.indices).filter(i => i.index_type === 'embedding').length
-          return embeddingIdxCount > 0 && (
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Info className="h-3 w-3" />
-              <span className="tabular-nums">{embeddingIdxCount} idx</span>
-            </span>
-          )
-        })()}
         <span className="text-[11px] text-muted-foreground tabular-nums">
           {rowCount != null ? rowCount.toLocaleString() : '—'} rows × {columnCount} columns
         </span>
         {(lastSchemaChange || lastDataChange) && (
-          <span className="text-[11px] text-muted-foreground">
+          <>
+            <span className="text-[11px] text-muted-foreground">·</span>
+            <span className="text-[11px] text-muted-foreground">
             {lastSchemaChange && <>last schema change: <span className="tabular-nums">{formatRelative(lastSchemaChange)}</span></>}
             {lastSchemaChange && lastDataChange && <span className="mx-2">·</span>}
             {lastDataChange && <>last data change: <span className="tabular-nums">{formatRelative(lastDataChange)}</span></>}
-          </span>
+            </span>
+          </>
         )}
         <button
           onClick={() => setShowSnippet(!showSnippet)}
@@ -1480,8 +1458,8 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
   const [searchQuery, setSearchQuery] = useState('')
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
-  const PAGE_SIZE_OPTIONS = viewMode === 'gallery' ? [12, 24, 48, 96] : [25, 50, 100, 250, 500]
-  const [pageSize, setPageSize] = useState(viewMode === 'gallery' ? 24 : 50)
+  const PAGE_SIZE_OPTIONS = viewMode === 'gallery' ? [12, 24, 48, 96] : [10, 25, 50, 100]
+  const [pageSize, setPageSize] = useState(viewMode === 'gallery' ? 24 : 25)
 
   // Fetch metadata
   useEffect(() => {
@@ -1696,6 +1674,7 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
           <ColumnChips
             columns={Object.values(metadata.columns)}
             indices={Object.values(metadata.indices).filter(idx => idx.index_type === 'embedding')}
+            tableMediaValidation={metadata.media_validation}
             expanded={schemaExpanded}
             onToggle={toggleSchema}
           />
