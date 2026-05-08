@@ -4,10 +4,6 @@ import { cn } from '@/lib/utils'
 import {
   Folder,
   FolderOpen,
-  Table2,
-  Eye,
-  Camera,
-  Copy,
   ChevronRight,
   ChevronDown,
   Search,
@@ -22,6 +18,20 @@ interface DirectoryTreeProps {
   onSelect: (path: string, type: string) => void
 }
 
+function CircleBadge({ letter, className }: { letter: string; className: string }) {
+  return (
+    <span
+      className={cn(
+        'h-4 w-4 shrink-0 rounded-full flex items-center justify-center text-white',
+        'text-[10px] font-normal leading-none',
+        className,
+      )}
+    >
+      {letter}
+    </span>
+  )
+}
+
 function getNodeIcon(type: string, isOpen: boolean = false) {
   switch (type) {
     case 'directory':
@@ -29,15 +39,15 @@ function getNodeIcon(type: string, isOpen: boolean = false) {
         ? <FolderOpen className="h-3.5 w-3.5 text-k-yellow shrink-0" />
         : <Folder className="h-3.5 w-3.5 text-k-yellow shrink-0" />
     case 'table':
-      return <Table2 className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+      return <CircleBadge letter="t" className="bg-muted-foreground/70" />
     case 'view':
-      return <Eye className="h-3.5 w-3.5 text-purple-400 shrink-0" />
+      return <CircleBadge letter="v" className="bg-muted-foreground/70" />
     case 'snapshot':
-      return <Camera className="h-3.5 w-3.5 text-orange-400 shrink-0" />
+      return <CircleBadge letter="s" className="bg-muted-foreground/70" />
     case 'replica':
-      return <Copy className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+      return <CircleBadge letter="r" className="bg-muted-foreground/70" />
     default:
-      return <Table2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+      return <CircleBadge letter="?" className="bg-muted-foreground/70" />
   }
 }
 
@@ -125,11 +135,6 @@ function TreeItem({ node, level, selectedPath, onSelect, filter, collapsedAll }:
           </span>
         )}
 
-        {!isDirectory && node.version !== null && (
-          <span className="text-[10px] text-muted-foreground/40 tabular-nums shrink-0">
-            v{node.version}
-          </span>
-        )}
       </button>
 
       {isDirectory && hasChildren && isOpen && (
