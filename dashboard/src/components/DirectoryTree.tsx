@@ -18,37 +18,28 @@ interface DirectoryTreeProps {
   onSelect: (path: string, type: string) => void
 }
 
-function CircleBadge({ letter, className }: { letter: string; className: string }) {
+// Font Awesome Pro 7.1.0 square-letter icon paths (commercial license).
+const SQUARE_LETTER_PATHS: Record<string, string> = {
+  table: 'M64 80c-8.8 0-16 7.2-16 16l0 320c0 8.8 7.2 16 16 16l320 0c8.8 0 16-7.2 16-16l0-320c0-8.8-7.2-16-16-16L64 80zM0 96C0 60.7 28.7 32 64 32l320 0c35.3 0 64 28.7 64 64l0 320c0 35.3-28.7 64-64 64L64 480c-35.3 0-64-28.7-64-64L0 96zm136 48l176 0c13.3 0 24 10.7 24 24s-10.7 24-24 24l-64 0 0 152c0 13.3-10.7 24-24 24s-24-10.7-24-24l0-152-64 0c-13.3 0-24-10.7-24-24s10.7-24 24-24z',
+  view: 'M64 80c-8.8 0-16 7.2-16 16l0 320c0 8.8 7.2 16 16 16l320 0c8.8 0 16-7.2 16-16l0-320c0-8.8-7.2-16-16-16L64 80zM0 96C0 60.7 28.7 32 64 32l320 0c35.3 0 64 28.7 64 64l0 320c0 35.3-28.7 64-64 64L64 480c-35.3 0-64-28.7-64-64L0 96zm157.5 61.3L224 290.3 290.5 157.3c5.9-11.9 20.3-16.7 32.2-10.7s16.7 20.3 10.7 32.2l-88 176c-4.1 8.1-12.4 13.3-21.5 13.3s-17.4-5.1-21.5-13.3l-88-176c-5.9-11.9-1.1-26.3 10.7-32.2s26.3-1.1 32.2 10.7z',
+  snapshot: 'M64 80c-8.8 0-16 7.2-16 16l0 320c0 8.8 7.2 16 16 16l320 0c8.8 0 16-7.2 16-16l0-320c0-8.8-7.2-16-16-16L64 80zM0 96C0 60.7 28.7 32 64 32l320 0c35.3 0 64 28.7 64 64l0 320c0 35.3-28.7 64-64 64L64 480c-35.3 0-64-28.7-64-64L0 96zm202.5 48l69.5 0c13.3 0 24 10.7 24 24s-10.7 24-24 24l-69.5 0c-10.2 0-18.5 8.3-18.5 18.5 0 9.3 6.9 17.2 16.2 18.3l53.6 6.7c33.3 4.2 58.2 32.4 58.2 66 0 36.7-29.8 66.5-66.5 66.5L168 368c-13.3 0-24-10.7-24-24s10.7-24 24-24l77.5 0c10.2 0 18.5-8.3 18.5-18.5 0-9.3-6.9-17.2-16.2-18.3l-53.6-6.7c-33.3-4.2-58.2-32.4-58.2-66 0-36.7 29.8-66.5 66.5-66.5z',
+  replica: 'M64 80c-8.8 0-16 7.2-16 16l0 320c0 8.8 7.2 16 16 16l320 0c8.8 0 16-7.2 16-16l0-320c0-8.8-7.2-16-16-16L64 80zM0 96C0 60.7 28.7 32 64 32l320 0c35.3 0 64 28.7 64 64l0 320c0 35.3-28.7 64-64 64L64 480c-35.3 0-64-28.7-64-64L0 96zm168 48l80 0c39.8 0 72 32.2 72 72 0 28.9-17 53.8-41.6 65.3l30.2 50.3c6.8 11.4 3.1 26.1-8.2 32.9s-26.1 3.1-32.9-8.2l-41-68.3-34.4 0 0 56c0 13.3-10.7 24-24 24s-24-10.7-24-24l0-176c0-13.3 10.7-24 24-24zm72 96l8 0c13.3 0 24-10.7 24-24s-10.7-24-24-24l-56 0 0 48 48 0z',
+}
+
+function KindBadge({ kind }: { kind: string }) {
+  const path = SQUARE_LETTER_PATHS[kind]
+  if (!path) return null
   return (
-    <span
-      className={cn(
-        'h-4 w-4 shrink-0 rounded-full flex items-center justify-center text-white',
-        'text-[10px] font-normal leading-none',
-        className,
-      )}
-    >
-      {letter}
-    </span>
+    <svg viewBox="0 0 448 512" className="h-3.5 w-3.5 shrink-0 text-muted-foreground/80" aria-hidden="true">
+      <path fill="currentColor" d={path} />
+    </svg>
   )
 }
 
-function getNodeIcon(type: string, isOpen: boolean = false) {
-  switch (type) {
-    case 'directory':
-      return isOpen
-        ? <FolderOpen className="h-3.5 w-3.5 text-k-yellow shrink-0" />
-        : <Folder className="h-3.5 w-3.5 text-k-yellow shrink-0" />
-    case 'table':
-      return <CircleBadge letter="t" className="bg-muted-foreground/70" />
-    case 'view':
-      return <CircleBadge letter="v" className="bg-muted-foreground/70" />
-    case 'snapshot':
-      return <CircleBadge letter="s" className="bg-muted-foreground/70" />
-    case 'replica':
-      return <CircleBadge letter="r" className="bg-muted-foreground/70" />
-    default:
-      return <CircleBadge letter="?" className="bg-muted-foreground/70" />
-  }
+function getDirectoryIcon(isOpen: boolean) {
+  return isOpen
+    ? <FolderOpen className="h-3.5 w-3.5 text-k-yellow shrink-0" />
+    : <Folder className="h-3.5 w-3.5 text-k-yellow shrink-0" />
 }
 
 function countDescendants(node: TreeNode): number {
@@ -120,7 +111,9 @@ function TreeItem({ node, level, selectedPath, onSelect, filter, collapsedAll }:
           <span className="w-3.5 h-3.5 shrink-0" />
         )}
 
-        {getNodeIcon(node.kind, isOpen)}
+        {isDirectory
+          ? getDirectoryIcon(isOpen)
+          : <span className="w-3.5 h-3.5 shrink-0" />}
         <span className="flex-1 text-[13px] truncate">{node.name}</span>
 
         {hasErrors && !isDirectory && (
@@ -134,6 +127,8 @@ function TreeItem({ node, level, selectedPath, onSelect, filter, collapsedAll }:
             {descendantCount}
           </span>
         )}
+
+        {!isDirectory && <KindBadge kind={node.kind} />}
 
       </button>
 
