@@ -20,7 +20,7 @@ import {
   ImageIcon, Film, Music, FileText,
   Rows3, Table2, Filter, X, Search,
   RefreshCw, Zap, Key, Download, SquareFunction,
-  Info, Eye, Copy,
+  Copy,
   GitBranch, ArrowRight, ExternalLink,
   AlertTriangle, Clock,
 } from 'lucide-react'
