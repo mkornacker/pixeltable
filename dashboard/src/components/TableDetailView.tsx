@@ -20,7 +20,7 @@ import {
   ImageIcon, Film, Music, FileText,
   Rows3, Table2, Filter, X, Search,
   RefreshCw, Zap, Key, Download,
-  Info, Eye, Camera, Copy,
+  Info, Eye, Copy,
   GitBranch, ArrowRight, ExternalLink,
   AlertTriangle, Clock,
 } from 'lucide-react'
@@ -875,7 +875,7 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
         {computedCount > 0 && (
           <>
             <span className="text-[11px] text-muted-foreground/60">·</span>
-            <span className="text-[11px] text-k-yellow/80 tabular-nums">{computedCount} computed</span>
+            <span className="text-[11px] text-muted-foreground tabular-nums">{computedCount} computed</span>
           </>
         )}
         {showFilter && (
@@ -1009,17 +1009,17 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
                       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                         <span className="tabular-nums">v{col.version_added}</span>
                         {col.is_iterator_col && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-violet-400/10 text-violet-400 font-medium">iterator</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-medium">iterator</span>
                         )}
                         {!col.is_stored && col.is_computed && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-sky-400/10 text-sky-400 font-medium" title="Computed on demand, not stored">dynamic</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-medium" title="Computed on demand, not stored">dynamic</span>
                         )}
                         {col.media_validation && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-teal-400/10 text-teal-400 font-medium" title={`Media validated ${col.media_validation}`}>{col.media_validation}</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-medium" title={`Media validated ${col.media_validation}`}>{col.media_validation}</span>
                         )}
                         {col.destination && (
                           <span
-                            className="px-1.5 py-0.5 rounded text-[10px] bg-orange-400/10 text-orange-400 font-mono font-medium truncate max-w-[200px]"
+                            className="px-1.5 py-0.5 rounded text-[10px] bg-muted/40 text-muted-foreground font-mono font-medium truncate max-w-[200px]"
                             title={col.destination}
                           >
                             → {col.destination}
@@ -1128,34 +1128,13 @@ function TableHeader({ metadata, onTableClick }: { metadata: TableMetadata; onTa
   const [showSnippet, setShowSnippet] = useState(false)
   const kind = metadata.kind
 
-  const Icon = {
-    table: Table2,
-    view: Eye,
-    snapshot: Camera,
-    replica: Copy,
-  }[kind] ?? Table2
-
-  const typeClasses: Record<string, string> = {
-    table: 'bg-blue-500/10 text-blue-400 border-blue-400/20',
-    view: 'bg-purple-500/10 text-purple-400 border-purple-400/20',
-    snapshot: 'bg-orange-500/10 text-orange-400 border-orange-400/20',
-    replica: 'bg-muted text-muted-foreground border-border',
-  }
-
   return (
     <div className="px-4 pt-3 pb-2.5 border-b border-border/40 shrink-0">
       <div className="flex items-center gap-2.5 mb-0.5">
-        <Icon className="h-4 w-4 text-muted-foreground/60" />
         <h2 className="text-sm font-semibold text-foreground">{metadata.name}</h2>
-        <span className={cn(
-          'px-2 py-0.5 rounded-full text-[10px] font-medium border',
-          typeClasses[kind] ?? typeClasses.replica,
-        )}>
+        <span className="px-2 py-0.5 rounded-full text-[10px] font-medium border bg-muted/40 text-muted-foreground border-border/40">
           {kind}
         </span>
-        {metadata.version !== null && (
-          <span className="text-xs text-muted-foreground tabular-nums">v{metadata.version}</span>
-        )}
         {(() => {
           const embeddingIdxCount = Object.values(metadata.indices).filter(i => i.index_type === 'embedding').length
           return embeddingIdxCount > 0 && (

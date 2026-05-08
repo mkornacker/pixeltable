@@ -44,10 +44,8 @@ export function ColumnTypeIcon({ type, className = 'h-3.5 w-3.5' }: { type: stri
 }
 
 export function ColumnTypeBadge({ type }: { type: string }) {
-  const { icon: Icon, color, bg } = getColumnTypeMeta(type)
   return (
-    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono ${bg} ${color}`}>
-      <Icon className="h-3 w-3 shrink-0" />
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono bg-muted/40 text-muted-foreground">
       {type}
     </span>
   )
