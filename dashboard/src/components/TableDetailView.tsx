@@ -397,7 +397,7 @@ function CellDetail({ value, onClose, pythonHighlight = false }: {
           {isJson && !viewRaw ? (
             <JsonNode value={parsed} depth={0} expandLevel={expandLevel} searchMatch={searchLower} path="$" />
           ) : pythonHighlight && !viewRaw ? (
-            <div className="whitespace-pre-wrap break-all text-foreground/90">
+            <div className="whitespace-pre-wrap text-foreground/90">
               <PythonExpr code={value} />
             </div>
           ) : (
@@ -966,7 +966,7 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
                     />
                   </th>
                   <th className="relative py-1.5 px-2 font-medium overflow-visible">
-                    Expression
+                    Computed With
                     <ColResizeHandle
                       atMin={colWidths.expr <= SCHEMA_COL_MIN.expr}
                       getStartWidth={() => colWidths.expr}
@@ -1001,7 +1001,7 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
                     <td className="py-1.5 px-2 overflow-hidden">
                       {col.is_computed && col.computed_with ? (() => {
                         const expr = col.computed_with
-                        const isLong = expr.length > 60
+                        const isLong = expr.includes('\n') || expr.length > 60
                         return (
                           <div
                             className={cn(
@@ -1011,7 +1011,7 @@ function ColumnChips({ columns, indices, expanded, onToggle }: {
                             title={isLong ? 'Click to expand' : expr}
                             onClick={isLong ? () => setExpandedExpr(expr) : undefined}
                           >
-                            <PythonExpr code={expr} className="text-[11px] font-mono leading-relaxed break-all" />
+                            <PythonExpr code={expr} className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap" />
                           </div>
                         )
                       })() : (

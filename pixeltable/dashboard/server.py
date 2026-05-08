@@ -99,7 +99,9 @@ def _(path: str, query: dict) -> dict:
 
 @_api_route('/api/tables/meta')
 def _(path: str, _query: dict) -> dict:
-    return dict(pxt.get_table(path).get_metadata())
+    md = dict(pxt.get_table(path).get_metadata())
+    bridge.format_metadata_computed_with(md)
+    return md
 
 
 @_api_route('/api/tables/export')
