@@ -1202,7 +1202,8 @@ function TableHeader({ metadata, versions, rowCount }: { metadata: TableMetadata
 
 // ── Lineage Panel ─────────────────────────────────────────────────────────
 
-function LineagePanel({ tablePath, pipelineData, pipelineColumns, onTableClick, onViewFullLineage }: {
+function LineagePanel({ mode, tablePath, pipelineData, pipelineColumns, onTableClick, onViewFullLineage }: {
+  mode: 'table' | 'column'
   tablePath: string
   pipelineData: { nodes: PipelineNodeType[]; edges: PipelineEdge[] } | null
   pipelineColumns: PipelineColumn[] | null
@@ -1217,96 +1218,119 @@ function LineagePanel({ tablePath, pipelineData, pipelineColumns, onTableClick, 
     )
   }
 
-  const currentNode = pipelineData.nodes.find(n => n.path === tablePath)
-  const baseNode = currentNode?.base ? pipelineData.nodes.find(n => n.path === currentNode.base) : null
-  const derivedNodes = pipelineData.nodes.filter(n => n.base === tablePath)
+  const nodeByPath = new Map(pipelineData.nodes.map(n => [n.path, n]))
+  const currentNode = nodeByPath.get(tablePath) ?? null
+  // Walk base chain root-first.
+  const ancestorChain: PipelineNodeType[] = []
+  let cursor = currentNode?.base ? nodeByPath.get(currentNode.base) : null
+  while (cursor) {
+    ancestorChain.unshift(cursor)
+    cursor = cursor.base ? nodeByPath.get(cursor.base) ?? null : null
+  }
+  const childrenOf = (path: string) => pipelineData.nodes.filter(n => n.base === path)
   const hasColumnDeps = pipelineColumns?.some(c => c.depends_on && c.depends_on.length > 0)
 
   const NodeCard = ({ node, label, isCurrent }: { node: PipelineNodeType; label?: string; isCurrent?: boolean }) => {
-    const Icon = node.is_view ? Eye : Table2
     return (
       <div
         className={cn(
           'rounded-lg border p-3 min-w-[180px] transition-colors',
           isCurrent
-            ? 'border-k-yellow/40 bg-k-yellow/5'
+            ? 'border-foreground/40 bg-muted/40'
             : 'border-border/60 bg-card/50 hover:border-border cursor-pointer',
         )}
         onClick={() => !isCurrent && onTableClick(node.path)}
       >
         {label && <div className="text-[10px] uppercase tracking-wider text-muted-foreground/60 mb-1.5">{label}</div>}
         <div className="flex items-center gap-2">
-          <Icon className={cn('h-3.5 w-3.5 shrink-0', node.is_view ? 'text-purple-400' : 'text-blue-400')} />
-          <span className={cn('text-xs font-medium font-mono', isCurrent ? 'text-foreground' : 'text-k-yellow hover:underline')}>
+          <KindBadge kind={node.is_view ? 'view' : 'table'} className="h-3.5 w-3.5 text-muted-foreground/80" />
+          <span className={cn('text-xs font-medium font-mono', isCurrent ? 'text-foreground' : 'text-foreground hover:underline')}>
             {node.name}
           </span>
-          {node.is_view && <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/10 text-purple-400">view</span>}
         </div>
         <div className="flex items-center gap-3 mt-1.5 text-[11px] text-muted-foreground">
           <span className="tabular-nums">{node.row_count.toLocaleString()} rows</span>
-          {node.version !== null && <span>v{node.version}</span>}
         </div>
         <div className="flex items-center gap-1 mt-1 text-[11px] text-muted-foreground">
-          <span>{node.insertable_count} stored</span>
+          <span className="tabular-nums">{node.insertable_count} mutable</span>
           {node.computed_count > 0 && (
-            <span className="text-k-yellow/70">+ {node.computed_count} computed</span>
+            <>
+              <span className="text-muted-foreground/60">·</span>
+              <span className="tabular-nums">{node.computed_count} computed</span>
+            </>
           )}
         </div>
       </div>
     )
   }
 
-  return (
-    <div className="flex flex-col h-full overflow-auto">
-      {/* Table relationship chain */}
-      <div className="px-5 py-4 border-b border-border/40">
-        <div className="flex items-center gap-3 mb-3">
-          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">Table Relationships</h3>
-          <button onClick={onViewFullLineage} className="flex items-center gap-1 text-[11px] text-k-yellow hover:underline transition-colors">
-            <GitBranch className="h-3 w-3" />
-            View full pipeline
-          </button>
+  if (mode === 'table') {
+    const DescendantTree = ({ path }: { path: string }) => {
+      const children = childrenOf(path)
+      if (children.length === 0) return null
+      return (
+        <div className="flex flex-col gap-2">
+          {children.map(child => (
+            <div key={child.path} className="flex items-start gap-3">
+              <NodeCard node={child} />
+              {childrenOf(child.path).length > 0 && (
+                <>
+                  <ArrowRight className="h-4 w-4 text-muted-foreground/40 mt-6 shrink-0" />
+                  <DescendantTree path={child.path} />
+                </>
+              )}
+            </div>
+          ))}
         </div>
-        <div className="flex items-start gap-3 flex-wrap">
-          {baseNode && (
-            <>
-              <NodeCard node={baseNode} label="Base table" />
-              <ArrowRight className="h-4 w-4 text-muted-foreground/40 mt-6 shrink-0" />
-            </>
-          )}
-          {currentNode && <NodeCard node={currentNode} label={baseNode ? 'Current' : undefined} isCurrent />}
-          {derivedNodes.length > 0 && (
-            <>
-              <ArrowRight className="h-4 w-4 text-muted-foreground/40 mt-6 shrink-0" />
-              <div className="flex flex-col gap-2">
-                {derivedNodes.map(n => (
-                  <NodeCard key={n.path} node={n} label="Derived" />
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-        {!baseNode && derivedNodes.length === 0 && currentNode && (
-          <p className="text-[11px] text-muted-foreground mt-2">This is a standalone table with no base or derived views.</p>
-        )}
-      </div>
+      )
+    }
+    const hasAncestors = ancestorChain.length > 0
+    const hasDescendants = currentNode != null && childrenOf(currentNode.path).length > 0
 
-      {/* Column flow diagram */}
-      {hasColumnDeps && pipelineColumns ? (
-        <div className="flex-1 min-h-[400px]">
-          <div className="px-5 pt-3 pb-1">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">Column Data Flow</h3>
+    return (
+      <div className="flex flex-col h-full overflow-auto">
+        <div className="px-5 py-4">
+          <div className="flex items-center justify-end mb-3">
+            <button onClick={onViewFullLineage} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors">
+              <GitBranch className="h-3 w-3" />
+              View full pipeline
+            </button>
           </div>
-          <div className="h-[calc(100%-36px)]">
-            <ColumnFlowDiagram columns={pipelineColumns} />
+          <div className="flex items-start gap-3 flex-wrap">
+            {ancestorChain.map((n, i) => (
+              <div key={n.path} className="flex items-start gap-3">
+                <NodeCard node={n} label={i === 0 ? 'Root' : 'Base'} />
+                <ArrowRight className="h-4 w-4 text-muted-foreground/40 mt-6 shrink-0" />
+              </div>
+            ))}
+            {currentNode && <NodeCard node={currentNode} label={hasAncestors ? 'Current' : undefined} isCurrent />}
+            {hasDescendants && currentNode && (
+              <>
+                <ArrowRight className="h-4 w-4 text-muted-foreground/40 mt-6 shrink-0" />
+                <DescendantTree path={currentNode.path} />
+              </>
+            )}
           </div>
+          {!hasAncestors && !hasDescendants && currentNode && (
+            <p className="text-[11px] text-muted-foreground mt-2">This is a standalone table with no base or derived views.</p>
+          )}
         </div>
-      ) : (
-        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-          <GitBranch className="h-8 w-8 text-muted-foreground/20 mb-2" />
-          <p className="text-xs">No computed column dependencies to visualize</p>
-        </div>
-      )}
+      </div>
+    )
+  }
+
+  // mode === 'column'
+  if (hasColumnDeps && pipelineColumns) {
+    return (
+      <div className="h-full min-h-0">
+        <ColumnFlowDiagram columns={pipelineColumns} />
+      </div>
+    )
+  }
+  return (
+    <div className="h-full flex flex-col items-center justify-center py-16 text-muted-foreground">
+      <GitBranch className="h-8 w-8 text-muted-foreground/20 mb-2" />
+      <p className="text-xs">No computed column dependencies to visualize</p>
     </div>
   )
 }
@@ -1451,7 +1475,7 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
   }, [])
   const [pipelineColumns, setPipelineColumns] = useState<PipelineColumn[] | null>(null)
   const [pipelineData, setPipelineData] = useState<{ nodes: PipelineNodeType[]; edges: PipelineEdge[] } | null>(null)
-  const [contentTab, setContentTab] = useState<'data' | 'lineage' | 'history'>('data')
+  const [contentTab, setContentTab] = useState<'data' | 'lineage-table' | 'lineage-column' | 'history'>('data')
   const [searchQuery, setSearchQuery] = useState('')
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -1696,12 +1720,20 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
               Data
             </button>
             <button
-              onClick={() => setContentTab('lineage')}
+              onClick={() => setContentTab('lineage-table')}
               className={cn('flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors',
-                contentTab === 'lineage' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground')}
+                contentTab === 'lineage-table' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground')}
             >
               <GitBranch className="h-3 w-3" />
-              Lineage
+              Table lineage
+            </button>
+            <button
+              onClick={() => setContentTab('lineage-column')}
+              className={cn('flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors',
+                contentTab === 'lineage-column' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground')}
+            >
+              <GitBranch className="h-3 w-3" />
+              Column lineage
             </button>
             <button
               onClick={() => setContentTab('history')}
@@ -1880,9 +1912,10 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
       </div>
 
       {/* ── Content Area ─────────────────────────────────────────────── */}
-      {contentTab === 'lineage' ? (
+      {contentTab === 'lineage-table' || contentTab === 'lineage-column' ? (
         <div className="flex-1 min-h-0 overflow-hidden">
           <LineagePanel
+            mode={contentTab === 'lineage-table' ? 'table' : 'column'}
             tablePath={tablePath}
             pipelineData={pipelineData}
             pipelineColumns={pipelineColumns}
