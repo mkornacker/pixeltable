@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { ColumnFlowDiagram } from './ColumnFlowDiagram'
 import { ColumnTypeBadge, ColumnTypeIcon } from '@/lib/column-types'
+import { KindBadge } from './KindBadge'
 import { PythonExpr } from '@/lib/python-highlight'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1124,17 +1125,29 @@ function SdkSnippet({ metadata }: { metadata: TableMetadata }) {
   )
 }
 
-function TableHeader({ metadata, onTableClick }: { metadata: TableMetadata; onTableClick: (path: string) => void }) {
+function TableHeader({ metadata, versions, rowCount, onTableClick }: { metadata: TableMetadata; versions: PipelineVersion[]; rowCount: number | null; onTableClick: (path: string) => void }) {
   const [showSnippet, setShowSnippet] = useState(false)
   const kind = metadata.kind
+  const columnCount = Object.keys(metadata.columns).length
+  const lastSchemaChange = versions.find(v => v.change_type === 'schema')?.created_at ?? null
+  const lastDataChange = versions.find(v => v.change_type === 'data')?.created_at ?? null
+  const formatRelative = (s: string): string => {
+    const diffMs = Date.now() - new Date(s).getTime()
+    const diffMin = Math.floor(diffMs / 60_000)
+    if (diffMin < 1) return '< 1 min ago'
+    if (diffMin < 60) return `${diffMin} min ago`
+    const diffHr = Math.floor(diffMin / 60)
+    if (diffHr < 24) return `${diffHr} hour${diffHr === 1 ? '' : 's'} ago`
+    const diffDay = Math.floor(diffHr / 24)
+    if (diffDay <= 30) return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`
+    return '> 30 days ago'
+  }
 
   return (
     <div className="px-4 pt-3 pb-2.5 border-b border-border/40 shrink-0">
       <div className="flex items-center gap-2.5 mb-0.5">
+        <KindBadge kind={kind} className="h-4 w-4 text-muted-foreground/80" />
         <h2 className="text-sm font-semibold text-foreground">{metadata.name}</h2>
-        <span className="px-2 py-0.5 rounded-full text-[10px] font-medium border bg-muted/40 text-muted-foreground border-border/40">
-          {kind}
-        </span>
         {(() => {
           const embeddingIdxCount = Object.values(metadata.indices).filter(i => i.index_type === 'embedding').length
           return embeddingIdxCount > 0 && (
@@ -1144,14 +1157,15 @@ function TableHeader({ metadata, onTableClick }: { metadata: TableMetadata; onTa
             </span>
           )
         })()}
-        {metadata.media_validation && (
-          <span className="text-[10px] text-muted-foreground/70 bg-muted/30 px-1.5 py-0.5 rounded border border-border/30"
-            title={`Media validation: ${metadata.media_validation}`}>
-            {metadata.media_validation}
+        <span className="text-[11px] text-muted-foreground tabular-nums">
+          {rowCount != null ? rowCount.toLocaleString() : '—'} rows × {columnCount} columns
+        </span>
+        {(lastSchemaChange || lastDataChange) && (
+          <span className="text-[11px] text-muted-foreground">
+            {lastSchemaChange && <>last schema change: <span className="tabular-nums">{formatRelative(lastSchemaChange)}</span></>}
+            {lastSchemaChange && lastDataChange && <span className="mx-2">·</span>}
+            {lastDataChange && <>last data change: <span className="tabular-nums">{formatRelative(lastDataChange)}</span></>}
           </span>
-        )}
-        {metadata.version_created && (
-          <span className="text-[11px] text-muted-foreground">{new Date(metadata.version_created).toLocaleDateString()}</span>
         )}
         <button
           onClick={() => setShowSnippet(!showSnippet)}
@@ -1626,7 +1640,17 @@ export function TableDetailView({ tablePath }: { tablePath: string }) {
   return (
     <div className="flex flex-col h-full animate-fade-in">
       {/* ── Header ──────────────────────────────────────────────────── */}
-      <TableHeader metadata={metadata} onTableClick={(path) => navigate(`/table/${path}`)} />
+      {(() => {
+        const node = pipelineData?.nodes.find(n => n.path === tablePath)
+        return (
+          <TableHeader
+            metadata={metadata}
+            versions={node?.versions ?? []}
+            rowCount={node?.row_count ?? null}
+            onTableClick={(path) => navigate(`/table/${path}`)}
+          />
+        )
+      })()}
 
       <div ref={groupContainerRef} className="flex-1 min-h-0 flex flex-col">
       <PanelGroup
