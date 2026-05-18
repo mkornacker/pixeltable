@@ -391,7 +391,7 @@ class Catalog:
                             )
                             if for_write and lock_mutable_tree:
                                 self._compute_column_dependents(self._x_locked_tbl_ids)
-                            if _logger.isEnabledFor(logging.DEBUG):
+                            if Env.get().logging_is_enabled_for(logging.DEBUG, 'catalog'):
                                 # validate only when we don't see errors
                                 self.validate()
                         except PendingTableOpsError as e:
@@ -576,7 +576,7 @@ class Catalog:
                 msg = ''
             _logger.debug(f'Exception: {e.orig.__class__}: {msg} ({e})')
             # Suppress the underlying SQL exception unless DEBUG is enabled
-            raise_from = e if _logger.isEnabledFor(logging.DEBUG) else None
+            raise_from = e if Env.get().logging_is_enabled_for(logging.DEBUG, 'catalog') else None
             if isinstance(e.orig, psycopg.errors.DuplicateColumn):
                 # TODO: extend message with the name of the schema column (not the store column)
                 raise excs.AlreadyExistsError(excs.ErrorCode.COLUMN_ALREADY_EXISTS, 'Duplicate column') from raise_from
@@ -676,6 +676,10 @@ class Catalog:
         if tbl_md.is_mutable:
             locked.add(row.id)
             conn.execute(sql.update(schema.Table).values(lock_dummy=1).where(where_clause))
+            # Invalidate the cached TableVersion to make sure we are acting on the latest version after locking.
+            cached_tv = self._tbl_versions.get(TableVersionKey(tbl_id, None, None))
+            if cached_tv is not None:
+                cached_tv.is_validated = False
 
         if check_pending_ops:
             # check for pending ops after getting table lock
@@ -2580,6 +2584,9 @@ class Catalog:
                         is_fragment=version_record.md['is_fragment'],
                         additional_md=version_record.md['additional_md'],
                     )
+                ), (
+                    'Table version already exists in store. Expected no change outside of is_fragment and'
+                    f' additional_md, but stored version md is {version_record.md} and new one is {version_md}'
                 )
                 result = session.execute(
                     sql.update(schema.TableVersion.__table__)
@@ -2685,7 +2692,7 @@ class Catalog:
         status = conn.execute(sql.delete(schema.Table).where(schema.Table.id == tbl_id))
         assert status.rowcount == 1, status.rowcount
 
-    def load_replica_md(self, tbl: Table) -> list[TableVersionMd]:
+    def load_md_for_export(self, tbl: Table, as_replica: bool) -> list[TableVersionMd]:
         """
         Load metadata for the given table along with all its ancestors. The values of TableMd.current_version and
         TableMd.current_schema_version will be adjusted to ensure that the metadata represent a valid (internally
@@ -2704,9 +2711,10 @@ class Catalog:
             md = [snapshot_md, *md]
 
         for ancestor_md in md:
-            # Set the `is_replica` flag on every ancestor's TableMd.
-            ancestor_md.tbl_md.is_replica = True
-            # For replica metadata, we guarantee that the current_version and current_schema_version of TableMd
+            if as_replica:
+                # Set the `is_replica` flag on every ancestor's TableMd.
+                ancestor_md.tbl_md.is_replica = True
+            # For exported metadata, we guarantee that the current_version and current_schema_version of TableMd
             # match the corresponding values in TableVersionMd and TableSchemaVersionMd. This is to ensure that,
             # when the metadata is later stored in the catalog of a different Pixeltable instance, the values of
             # current_version and current_schema_version will always point to versions that are known to the
@@ -2714,11 +2722,12 @@ class Catalog:
             ancestor_md.tbl_md.current_version = ancestor_md.version_md.version
             ancestor_md.tbl_md.current_schema_version = ancestor_md.schema_version_md.schema_version
 
-        for ancestor_md in md[1:]:
-            # Also, the table version of every proper ancestor is emphemeral; it does not represent a queryable
-            # table version (the data might be incomplete, since we have only retrieved one of its views, not
-            # the table itself).
-            ancestor_md.version_md.is_fragment = True
+        if as_replica:
+            for ancestor_md in md[1:]:
+                # Also, the table version of every proper ancestor is ephemeral; it does not represent a queryable
+                # table version (the data might be incomplete, since we have only retrieved one of its views, not
+                # the table itself).
+                ancestor_md.version_md.is_fragment = True
 
         return md
 
