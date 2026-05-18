@@ -19,13 +19,13 @@ import {
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ChevronUp, ChevronDown,
   ImageIcon, Film, Music, FileText,
   Rows3, Table2, Filter, X, Search,
-  RefreshCw, Zap, Key, Download, SquareFunction,
+  RefreshCw, Key, Download, SquareFunction,
   Copy,
   GitBranch, ArrowRight, ExternalLink,
   AlertTriangle, Clock,
 } from 'lucide-react'
 import { ColumnFlowDiagram } from './ColumnFlowDiagram'
-import { ColumnTypeBadge, ColumnTypeIcon } from '@/lib/column-types'
+import { ColumnTypeBadge } from '@/lib/column-types'
 import { KindBadge } from './KindBadge'
 import { PythonExpr } from '@/lib/python-highlight'
 
@@ -921,8 +921,15 @@ function ColumnChips({ columns, indices, tableMediaValidation, expanded, onToggl
                 ].filter(Boolean).join('\n')}
               >
                 {col.is_primary_key && <Key className="h-2.5 w-2.5 text-foreground shrink-0" />}
-                {col.is_computed && !col.is_primary_key && <Zap className="h-2.5 w-2.5 shrink-0" />}
-                {!col.is_computed && !col.is_primary_key && <ColumnTypeIcon type={col.type_} className="h-2.5 w-2.5" />}
+                {!col.is_primary_key && col.is_iterator_col && (
+                  <KindBadge kind="iterator" className="h-2.5 w-2.5 text-muted-foreground" />
+                )}
+                {!col.is_primary_key && !col.is_iterator_col && col.is_computed && (
+                  <SquareFunction
+                    className={cn('h-2.5 w-2.5 text-muted-foreground shrink-0', !col.is_stored && 'opacity-50')}
+                    aria-label={col.is_stored ? 'computed' : 'computed on demand (not stored)'}
+                  />
+                )}
                 <span className="font-mono font-medium">{col.name}</span>
                 <span className="text-[10px] opacity-70">{col.type_}</span>
                 {col.destination && <ExternalLink className="h-2.5 w-2.5 text-muted-foreground shrink-0" />}
