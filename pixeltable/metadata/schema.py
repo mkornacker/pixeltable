@@ -23,10 +23,14 @@ T = TypeVar('T')
 
 
 def md_from_dict(type_: type[T], data: Any) -> T:
-    """Re-instantiate a dataclass instance that contains nested dataclasses from a dict."""
+    """Re-instantiate a dataclass instance that contains nested dataclasses from a dict.
+
+    Unknown keys in data (e.g. fields that have been removed in newer versions) are silently
+    dropped, so old serialized payloads round-trip cleanly.
+    """
     if dataclasses.is_dataclass(type_):
         fieldtypes = get_type_hints(type_)
-        return type_(**{f: md_from_dict(fieldtypes[f], data[f]) for f in data})
+        return type_(**{f: md_from_dict(fieldtypes[f], data[f]) for f in data if f in fieldtypes})
 
     origin = typing.get_origin(type_)
     if origin is not None:
@@ -206,7 +210,6 @@ class TableStatement(Enum):
 @dataclasses.dataclass
 class TableMd:
     tbl_id: str  # uuid.UUID
-    name: str
     is_replica: bool
 
     user: str | None
@@ -293,6 +296,8 @@ class Table(Base):
 
     id: orm.Mapped[uuid.UUID] = orm.mapped_column(UUID(as_uuid=True), primary_key=True, nullable=False)
     dir_id: orm.Mapped[uuid.UUID] = orm.mapped_column(UUID(as_uuid=True), ForeignKey('dirs.id'), nullable=True)
+    # identity field; mutated by Catalog._move_table, never by writes to md
+    name: orm.Mapped[str] = orm.mapped_column(sql.String, nullable=False)
     md: orm.Mapped[dict[str, Any]] = orm.mapped_column(JSONB, nullable=False)  # TableMd
     additional_md: orm.Mapped[dict[str, Any]] = orm.mapped_column(JSONB, nullable=False, default=dict)
 

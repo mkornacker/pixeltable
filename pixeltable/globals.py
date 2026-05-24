@@ -16,7 +16,7 @@ from pixeltable.catalog.insertable_table import OnErrorParameter
 from pixeltable.config import Config
 from pixeltable.env import Env
 from pixeltable.io.table_data_conduit import QueryTableDataConduit, TableDataConduit
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 from pixeltable.share.protocol import PxtUri
 from pixeltable.types import ColumnSpec, DirectoryNode, TableKind, TableNode, TreeNode
 
@@ -247,9 +247,7 @@ def create_table(
         fail_on_exception = OnErrorParameter.fail_on_exception(on_error)
         if isinstance(data_source, QueryTableDataConduit):
             query = data_source.pxt_query
-            with get_runtime().catalog.begin_xact(
-                for_write=True, write_tvps=[tbl._tbl_version_path], lock_mutable_tree=True
-            ):
+            with get_runtime().catalog.begin_xact(mode=XactMode.WRITE_TREE, tvps=[tbl._tbl_version_path]):
                 tbl._tbl_version.get().insert(None, query, fail_on_exception=fail_on_exception)
         elif data_source is not None and not is_direct_query:
             assert isinstance(tbl, catalog.InsertableTable)
@@ -378,7 +376,7 @@ def create_view(
                 raise excs.AlreadyExistsError(
                     excs.ErrorCode.COLUMN_ALREADY_EXISTS,
                     f'Column {col_name!r} already exists in the base table '
-                    f'{tbl_version_path.get_column(col_name).get_tbl().name}.',
+                    f'{tbl_version_path.get_column(col_name).get_tbl().name()}.',
                 )
 
     if iterator is not None and not isinstance(iterator, func.GeneratingFunctionCall):
@@ -679,7 +677,7 @@ def drop_table(
     if isinstance(table, catalog.Table):
         # if we're dropping a table by handle, we first need to get the current path, then drop the S lock on
         # the Table record, and then get X locks in the correct order (first containing directory, then table)
-        with get_runtime().catalog.begin_xact(for_write=False):
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS):
             tbl_path = table._path()
     else:
         assert isinstance(table, str)
@@ -981,7 +979,7 @@ def ls(path: str = '') -> pd.DataFrame:
     path_obj = catalog.Path.parse(path, allow_empty_path=True)
     dir_entries = cat.get_dir_contents(path_obj)
 
-    @retry_loop(for_write=False)
+    @retry_loop(mode=XactMode.MD_ACCESS)
     def op() -> list[list[str]]:
         rows: list[list[str]] = []
         for name, entry in dir_entries.items():

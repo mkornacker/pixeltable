@@ -544,7 +544,7 @@ class Planner:
         recomputed_user_cols = [c for c in recomputed_cols if c.name is not None]
         return (
             plan,
-            [f'{c.get_tbl().name}.{c.name}' for c in list(update_targets.keys()) + recomputed_user_cols],
+            [f'{c.get_tbl().name()}.{c.name}' for c in list(update_targets.keys()) + recomputed_user_cols],
             recomputed_user_cols,
         )
 

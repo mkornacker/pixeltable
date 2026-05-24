@@ -495,7 +495,7 @@ class Column:
     @property
     def qualified_name(self) -> str:
         assert self.get_tbl() is not None
-        return f'{self.get_tbl().name}.{self.name}'
+        return f'{self.get_tbl().name()}.{self.name}'
 
     @property
     def media_validation(self) -> MediaValidation | None:
@@ -560,7 +560,7 @@ class Column:
         return f'{self.name}: {self.col_type}'
 
     def __repr__(self) -> str:
-        return f'Column({self.id!r}, {self.name!r}, tbl={self.get_tbl().name!r})'
+        return f'Column({self.id!r}, {self.name!r}, tbl={self.get_tbl().name()!r})'
 
     def __hash__(self) -> int:
         # TODO(aaron-siegel): This and __eq__ do not capture the table version. We need to rethink the Column

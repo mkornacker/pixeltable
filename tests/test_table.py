@@ -304,7 +304,6 @@ class TestTable:
             )
             assert tbl._path() == tbl_path
             assert tbl._name() == tbl_path.split('/')[-1]
-            assert tbl._parent()._path() == '/'.join(tbl_path.split('/')[:-1])
 
             assert_table_metadata_eq(
                 {

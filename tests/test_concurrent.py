@@ -5,6 +5,7 @@ from typing import Callable
 import pytest
 
 import pixeltable as pxt
+from tests.coordinator import MultiThreadedScenario
 from tests.utils import DummyIterator, validate_update_status
 
 
@@ -347,18 +348,19 @@ class TestConcurrentOps:
         assert errors == [], f'errors: {errors[:3]}'
 
     def test_shared_join2(self, uses_db: None) -> None:
-        """Table instances from the main thread can be reused in worker threads to create join queries."""
+        """Table refs from the main thread can be reused in joins from multiple worker threads concurrently."""
         t1 = pxt.create_table('j1', {'id': pxt.Required[pxt.Int]})
         t2 = pxt.create_table('j2', {'id': pxt.Required[pxt.Int]})
         validate_update_status(t1.insert([{'id': i} for i in range(5)]), expected_rows=5)
         validate_update_status(t2.insert([{'id': i} for i in range(5)]), expected_rows=5)
 
         def worker(_tid: int) -> None:
-            assert len(t1.join(t2, on=t1.id == t2.id).collect()) == 5
-            assert len(t1.select().join(t2, on=t1.id == t2.id).collect()) == 5
+            for _ in range(self.ITERATIONS):
+                assert len(t1.join(t2, on=t1.id == t2.id).collect()) == 5
+                assert len(t1.select().join(t2, on=t1.id == t2.id).collect()) == 5
 
-        errors = _run_workers(worker, n_threads=1)
-        assert errors == [], f'worker raised: {errors[0][1]!r}'
+        errors = _run_workers(worker, n_threads=self.NUM_THREADS)
+        assert not errors, f'workers raised: {errors!r}'
 
     def test_shared_snapshot_query(self, uses_db: None) -> None:
         t = pxt.create_table('t19_base', {'a': pxt.Required[pxt.Int]})
@@ -382,7 +384,9 @@ class TestConcurrentOps:
 
         def reader(_tid: int) -> None:
             # Read / introspection
-            t.get_metadata()
+            md = t.get_metadata()
+            assert md['name'] == 't_xthread'
+            assert md['path'] == 't_xthread'
             t.list_views()
             t.columns()
             t.describe()
@@ -420,3 +424,188 @@ class TestConcurrentOps:
 
         # Final count: initial row + writer's inserts.
         assert t.count() == 1 + n_inserts_per_writer
+
+    def test_concurrent_rename(self, uses_db: None) -> None:
+        """A reader calling t.get_metadata() while another thread renames the table must always
+        observe a (name, path) pair from a single catalog snapshot."""
+        pxt.create_dir('d1')
+        pxt.create_dir('d2')
+        t = pxt.create_table('d1.t1', {'a': pxt.Required[pxt.Int]})
+        valid = {('t1', 'd1/t1'), ('t2', 'd2/t2')}
+        n_moves = 500
+        stop = threading.Event()
+
+        def mover(_tid: int) -> None:
+            try:
+                for i in range(n_moves):
+                    if i % 2 == 0:
+                        pxt.move('d1.t1', 'd2.t2')
+                    else:
+                        pxt.move('d2.t2', 'd1.t1')
+            finally:
+                stop.set()
+
+        def reader(_tid: int) -> None:
+            while not stop.is_set():
+                md = t.get_metadata()
+                assert (md['name'], md['path']) in valid, (md['name'], md['path'])
+
+        errors = _run_workers(lambda tid: mover(tid) if tid == 0 else reader(tid), n_threads=self.NUM_THREADS)
+        assert not errors, f'workers raised: {errors!r}'
+
+    def test_concurrent_metadata_consistency(self, uses_db: None) -> None:
+        """get_metadata() observations are consistent with some valid catalog state when
+        concurrent threads rename the table and add/drop columns."""
+        pxt.create_dir('d1')
+        pxt.create_dir('d2')
+        t = pxt.create_table('d1.t1', {'a': pxt.Required[pxt.Int], 'b': pxt.Required[pxt.Int]})
+        # base columns always present; 'extra' toggles via add/drop
+        base_cols = {'a', 'b'}
+        valid_paths = {('t1', 'd1/t1'), ('t2', 'd2/t2')}
+        n_iters = 300
+        stop = threading.Event()
+
+        def mover(_tid: int) -> None:
+            try:
+                for i in range(n_iters):
+                    if i % 2 == 0:
+                        pxt.move('d1.t1', 'd2.t2')
+                    else:
+                        pxt.move('d2.t2', 'd1.t1')
+            finally:
+                stop.set()
+
+        def schema_mutator(_tid: int) -> None:
+            for i in range(n_iters):
+                if stop.is_set():
+                    return
+                if i % 2 == 0:
+                    t.add_computed_column(extra=t.a + 1, if_exists='ignore')
+                else:
+                    t.drop_column('extra', if_not_exists='ignore')
+
+        def reader(_tid: int) -> None:
+            while not stop.is_set():
+                md = t.get_metadata()
+                assert (md['name'], md['path']) in valid_paths, (md['name'], md['path'])
+                cols = set(md['columns'].keys())
+                assert cols == base_cols or cols == base_cols | {'extra'}, cols
+
+        def worker(tid: int) -> None:
+            if tid == 0:
+                mover(tid)
+            elif tid == 1:
+                schema_mutator(tid)
+            else:
+                reader(tid)
+
+        errors = _run_workers(worker, n_threads=self.NUM_THREADS)
+        assert not errors, f'workers raised: {errors!r}'
+
+    def test_concurrent_move(self, uses_db: None) -> None:
+        """Multiple threads concurrently move different tables between dirs. Each table should
+        end up at its expected destination."""
+        pxt.create_dir('src')
+        pxt.create_dir('dst')
+        n = self.NUM_THREADS
+        for i in range(n):
+            pxt.create_table(f'src.t{i}', {'a': pxt.Required[pxt.Int]})
+
+        def worker(tid: int) -> None:
+            # each worker moves "its own" table back and forth a few times, ending in dst
+            for _ in range(5):
+                pxt.move(f'src.t{tid}', f'dst.t{tid}')
+                pxt.move(f'dst.t{tid}', f'src.t{tid}')
+            pxt.move(f'src.t{tid}', f'dst.t{tid}')
+
+        errors = _run_workers(worker, n_threads=n)
+        assert not errors, f'workers raised: {errors!r}'
+        dst_paths = sorted(pxt.list_tables('dst'))
+        assert dst_paths == sorted(f'dst/t{i}' for i in range(n))
+
+    def test_concurrent_move_collision(self, uses_db: None) -> None:
+        """Two threads moving different tables to the same destination path serialize: exactly
+        one succeeds, the other gets pxt.Error under if_exists='error'."""
+        n_rounds = 20
+        for round_i in range(n_rounds):
+            pxt.create_table(f'a_{round_i}', {'a': pxt.Required[pxt.Int]})
+            pxt.create_table(f'b_{round_i}', {'a': pxt.Required[pxt.Int]})
+            results: list[BaseException | None] = [None, None]
+
+            def worker(tid: int, ri: int = round_i) -> None:
+                try:
+                    pxt.move(f'a_{ri}' if tid == 0 else f'b_{ri}', f'dst_{ri}')
+                except pxt.Error as e:
+                    results[tid] = e
+
+            errs = _run_workers(worker, n_threads=2)
+            assert not errs, f'unexpected errors: {errs!r}'
+            outcomes = [r is None for r in results]
+            assert sorted(outcomes) == [False, True], (outcomes, results)
+
+    def test_concurrent_move_dir_cycle(self, uses_db: None) -> None:
+        """Two threads concurrently moving directories in opposite directions must not produce
+        a cycle in the directory tree."""
+        pxt.create_dir('top_a')
+        pxt.create_dir('top_b')
+        n_rounds = 30
+
+        def worker_ab(_tid: int) -> None:
+            for _ in range(n_rounds):
+                try:
+                    pxt.move('top_a', 'top_b/top_a')
+                except pxt.Error:
+                    pass
+                try:
+                    pxt.move('top_b/top_a', 'top_a')
+                except pxt.Error:
+                    pass
+
+        def worker_ba(_tid: int) -> None:
+            for _ in range(n_rounds):
+                try:
+                    pxt.move('top_b', 'top_a/top_b')
+                except pxt.Error:
+                    pass
+                try:
+                    pxt.move('top_a/top_b', 'top_b')
+                except pxt.Error:
+                    pass
+
+        def worker(tid: int) -> None:
+            (worker_ab if tid % 2 == 0 else worker_ba)(tid)
+
+        errors = _run_workers(worker, n_threads=4)
+        # Whatever races occur, the dir tree must remain acyclic. Verify by listing all dirs;
+        # a cycle would cause list_dirs to loop or fail.
+        assert not errors, f'workers raised: {errors!r}'
+        # list_dirs returning successfully is the cycle-free check.
+        pxt.list_dirs(recursive=True)
+
+    def test_rename_not_undone_by_concurrent_md_write(self, uses_db: None) -> None:
+        """Regression: a concurrent metadata write must not silently undo a rename via stale cached tv.
+
+        Before the cache-invalidation fix in _get_tbl_version, thread 0's add_computed_column would
+        validate its cached tv only by version/view_sn (rename doesn't bump either), keep the stale
+        cached name, and write it back to disk, overwriting thread 1's rename.
+
+        Sequencing: thread 0 warms its catalog cache; thread 1 renames; thread 0 adds a column. The
+        bug manifests in step 3 when thread 0's stale cached tv is serialized back to disk."""
+        t = pxt.create_table('orig_name', {'a': pxt.Required[pxt.Int]})
+
+        (
+            MultiThreadedScenario()
+            # Thread 0: warm its catalog cache by reading metadata
+            .then_run(thread_id=0, name='warm cache', fn=lambda: t.get_metadata())
+            # Thread 1: rename the table from its own catalog instance
+            .then_run(thread_id=1, name='rename', fn=lambda: pxt.move('orig_name', 'new_name'))
+            # Thread 0: add a column. Without the fix, write_tbl_md serializes stale cached name.
+            .then_run(thread_id=0, name='add column', fn=lambda: t.add_computed_column(b=t.a + 1))
+            .execute()
+        )
+
+        # Observe via a fresh catalog read (the main thread's catalog hasn't seen any of this).
+        fresh_md = pxt.get_table('new_name').get_metadata()
+        assert fresh_md['name'] == 'new_name'
+        assert fresh_md['path'] == 'new_name'
+        assert 'b' in fresh_md['columns']

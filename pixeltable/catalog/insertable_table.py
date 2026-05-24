@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Sequence, overload
 import pixeltable as pxt
 from pixeltable import exceptions as excs, type_system as ts
 from pixeltable.env import Env
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 from pixeltable.types import ColumnSpec
 from pixeltable.utils.filecache import FileCache
 
@@ -65,7 +65,6 @@ class InsertableTable(Table):
     @classmethod
     def _create(
         cls,
-        name: str,
         schema: dict[str, type | ColumnSpec | exprs.Expr],
         primary_key: list[str],
         comment: str | None,
@@ -92,7 +91,6 @@ class InsertableTable(Table):
             col.is_pk = True
 
         md = TableVersion.create_initial_md(
-            name,
             columns,
             comment,
             custom_metadata,
@@ -185,9 +183,7 @@ class InsertableTable(Table):
 
         start_ts = time.perf_counter()
         status = pxt.UpdateStatus()
-        with get_runtime().catalog.begin_xact(
-            for_write=True, write_tvps=[self._tbl_version_path], lock_mutable_tree=True
-        ):
+        with get_runtime().catalog.begin_xact(mode=XactMode.WRITE_TREE, tvps=[self._tbl_version_path]):
             if isinstance(data_source, QueryTableDataConduit):
                 status += self._tbl_version.get().insert(
                     rows=None, query=data_source.pxt_query, print_stats=print_stats, fail_on_exception=fail_on_exception
@@ -221,9 +217,7 @@ class InsertableTable(Table):
 
             >>> tbl.delete(tbl.a > 5)
         """
-        with get_runtime().catalog.begin_xact(
-            for_write=True, write_tvps=[self._tbl_version_path], lock_mutable_tree=True
-        ):
+        with get_runtime().catalog.begin_xact(mode=XactMode.WRITE_TREE, tvps=[self._tbl_version_path]):
             return self._tbl_version.get().delete(where=where)
 
     def _get_base_table(self) -> 'Table' | None:

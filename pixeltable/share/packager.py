@@ -25,7 +25,7 @@ from pixeltable import catalog, exceptions as excs, metadata, type_system as ts
 from pixeltable.catalog.table_version import TableVersionKey, TableVersionMd
 from pixeltable.exprs.data_row import CellMd
 from pixeltable.metadata import schema
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 from pixeltable.utils import sha256sum
 from pixeltable.utils.formatter import Formatter
 from pixeltable.utils.local_store import TempStore
@@ -66,7 +66,7 @@ class TablePackager:
         self.media_files = {}
 
         # Load metadata and convert to JSON immediately
-        with get_runtime().catalog.begin_xact(for_write=False):
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS):
             tbl_md = get_runtime().catalog.load_md_for_export(table, as_replica=True)
             self.bundle_md = {
                 'pxt_version': pxt.__version__,
@@ -88,7 +88,7 @@ class TablePackager:
             json.dump(self.bundle_md, fp)
         self.tables_dir = self.tmp_dir / 'tables'
         self.tables_dir.mkdir()
-        with get_runtime().catalog.begin_xact(for_write=False, read_tvps=[self.table._tbl_version_path]):
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tvps=[self.table._tbl_version_path]):
             for tv in self.table._tbl_version_path.get_tbl_versions():
                 _logger.info(f'Exporting table {tv.get().versioned_name!r}.')
                 self.__export_table(tv.get())
@@ -442,7 +442,7 @@ class TableRestorer:
 
         cat = get_runtime().catalog
 
-        @retry_loop(for_write=True)
+        @retry_loop(mode=XactMode.WRITE_TBL)
         def do_restore() -> pxt.Table:
             # Create (or update) the replica table and its ancestors, along with TableVersion instances for any
             # versions that have not been seen before.
@@ -457,7 +457,7 @@ class TableRestorer:
                 if not md.is_pure_snapshot:
                     tv = cat.get_tbl_version(TableVersionKey(UUID(md.tbl_md.tbl_id), md.version_md.version, None))
                     # Import data from Parquet.
-                    _logger.info(f'Importing table {tv.name!r}.')
+                    _logger.info(f'Importing table {tv.name()!r}.')
                     self.__import_table(self.tmp_dir, tv, md)
 
             tbl = cat.get_table_by_id(UUID(tbl_md[0].tbl_md.tbl_id), version=explicit_version)

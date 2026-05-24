@@ -20,7 +20,7 @@ import pixeltable.index as index
 from pixeltable import exceptions as excs, func
 from pixeltable.env import Env
 from pixeltable.metadata import schema
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import IsolationLevel, XactMode, get_runtime
 from pixeltable.types import ColumnSpec
 from pixeltable.utils import fault_injection
 from pixeltable.utils.exception_handler import run_cleanup
@@ -80,13 +80,7 @@ T = TypeVar('T')
 
 
 def retry_loop(
-    *,
-    for_write: bool = False,
-    read_tvps: Collection[TableVersionPath] | None = None,
-    read_tbl_ids: Collection[UUID] | None = None,
-    write_tvps: Collection[TableVersionPath] | None = None,
-    write_tbl_ids: Collection[UUID] | None = None,
-    lock_mutable_tree: bool = False,
+    *, mode: XactMode, tvps: Collection[TableVersionPath] | None = None, tbl_ids: Collection[UUID] | None = None
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     def decorator(op: Callable[..., T]) -> Callable[..., T]:
         @functools.wraps(op)
@@ -106,14 +100,7 @@ def retry_loop(
                     with (
                         cat._allow_tbl_md_read(),
                         cat.begin_xact(
-                            for_write=for_write,
-                            read_tvps=read_tvps,
-                            read_tbl_ids=read_tbl_ids,
-                            write_tvps=write_tvps,
-                            write_tbl_ids=write_tbl_ids,
-                            convert_db_excs=False,
-                            lock_mutable_tree=lock_mutable_tree,
-                            finalize_pending_ops=True,
+                            mode=mode, tvps=tvps, tbl_ids=tbl_ids, convert_db_excs=False, finalize_pending_ops=True
                         ),
                     ):
                         return op(*args, **kwargs)
@@ -258,7 +245,7 @@ class Catalog:
         if dir_id is not None:
             clause = sql.and_(schema.Table.dir_id == dir_id, clause)
         if tbl_name is not None:
-            clause = sql.and_(schema.Table.md['name'].astext == tbl_name, clause)
+            clause = sql.and_(schema.Table.name == tbl_name, clause)
         return clause
 
     def _dropped_tbl_error_msg(self, tbl_id: UUID) -> str:
@@ -289,9 +276,9 @@ class Catalog:
                     base_tv = self._tbl_versions.get(key, None)
                     if base_tv is not None and base_tv.is_validated and tbl_version.handle not in base_tv.mutable_views:
                         mutable_view_ids = ', '.join(str(tv.id) for tv in base_tv.mutable_views)
-                        mutable_view_names = ', '.join(tv.get().name for tv in base_tv.mutable_views)
+                        mutable_view_names = ', '.join(tv.get().name() for tv in base_tv.mutable_views)
                         raise AssertionError(
-                            f'{tbl_version.name} ({tbl_version.id}) missing in '
+                            f'{tbl_version.name()} ({tbl_version.id}) missing in '
                             f'{mutable_view_ids} ({mutable_view_names})'
                         )
 
@@ -322,39 +309,34 @@ class Catalog:
     def begin_xact(
         self,
         *,
-        for_write: bool = False,
-        read_tvps: Collection[TableVersionPath] | None = None,
-        read_tbl_ids: Collection[UUID] | None = None,
-        write_tvps: Collection[TableVersionPath] | None = None,
-        write_tbl_ids: Collection[UUID] | None = None,
-        lock_mutable_tree: bool = False,
+        mode: XactMode,
+        tvps: Collection[TableVersionPath] | None = None,
+        tbl_ids: Collection[UUID] | None = None,
         convert_db_excs: bool = True,
         finalize_pending_ops: bool = True,
     ) -> Iterator[sql.Connection]:
+        """Yield a database connection inside a transaction. Idempotent (joins outer xact if any).
+
+        Mandatory whenever a transaction accesses table data or metadata; prefer this over
+        Env.begin_xact().
+
+        Args:
+            mode: isolation level + lock scope (see XactMode).
+            tvps / tbl_ids: target tables. WRITE_TBL/WRITE_TREE X-lock them; MD_ACCESS/QUERY refresh
+                their cached metadata. WRITE_TREE additionally X-locks all mutable descendant views.
+            finalize_pending_ops: on PendingTableOpsError, finalize pending ops and retry. Lock
+                acquisition runs in an internal retry loop so transient
+                SerializationFailure/LockNotAvailable errors do not bubble up.
+            convert_db_excs: convert DBAPIErrors into excs.Errors when possible.
         """
-        Return a context manager that yields a connection to the database. Idempotent.
-
-        It is mandatory to call this method, not Env.begin_xact(), if the transaction accesses any table data
-        or metadata.
-
-        Locking protocol (via _acquire_locks()):
-        - write targets (write_tvps, write_tbl_ids): x-locks each Table record (see
-          _acquire_write_lock() / _acquire_path_locks())
-        - read targets (read_tvps, read_tbl_ids): refreshes the metadata cache, no x-lock
-        - if lock_mutable_tree == True, also x-locks all mutable views of each write target
-        - if finalize_pending_ops == True and a PendingTableOpsError is raised, finalizes pending ops and retries
-        - this needs to be done in a retry loop, because Postgres can abort the transaction
-          (SerializationFailure, LockNotAvailable)
-        - for that reason, we do all lock acquisition prior to doing any real work (eg, compute column values),
-          to minimize the probability of losing that work due to a forced abort
-
-        If convert_db_excs == True, converts DBAPIErrors into excs.Errors if possible.
-        """
-        assert for_write or not (write_tvps or write_tbl_ids), 'for_write must be True when write targets are specified'
-        read_tvps = read_tvps or []
-        write_tvps = write_tvps or []
-        read_tbl_ids = read_tbl_ids or []
-        write_tbl_ids = write_tbl_ids or []
+        for_write = mode.is_write
+        lock_mutable_tree = mode is XactMode.WRITE_TREE
+        tvps = tvps or []
+        tbl_ids = tbl_ids or []
+        read_tvps = [] if for_write else list(tvps)
+        write_tvps = list(tvps) if for_write else []
+        read_tbl_ids = [] if for_write else list(tbl_ids)
+        write_tbl_ids = list(tbl_ids) if for_write else []
         if get_runtime().in_xact:
             # make sure all required locks are already being held
             for tvp in write_tvps:
@@ -381,7 +363,7 @@ class Catalog:
                 has_exc = False
 
                 assert not self._undo_actions
-                with get_runtime().begin_xact(for_write=for_write) as conn:
+                with get_runtime().begin_store_xact(isolation_level=Env.get().dbms.isolation_level(mode)) as conn:
                     with self._allow_tbl_md_read():
                         try:
                             self._acquire_locks(
@@ -639,7 +621,7 @@ class Catalog:
         if tbl_id is not None:
             where_clause = schema.Table.id == tbl_id
         else:
-            where_clause = sql.and_(schema.Table.dir_id == dir_id, schema.Table.md['name'].astext == tbl_name)
+            where_clause = sql.and_(schema.Table.dir_id == dir_id, schema.Table.name == tbl_name)
             user = Env.get().user
             if user is not None:
                 where_clause = sql.and_(where_clause, schema.Table.md['user'].astext == Env.get().user)
@@ -771,7 +753,7 @@ class Catalog:
             try:
                 with (
                     self.begin_xact(
-                        for_write=True, write_tbl_ids=[tbl_id], convert_db_excs=False, finalize_pending_ops=False
+                        mode=XactMode.WRITE_TBL, tbl_ids=[tbl_id], convert_db_excs=False, finalize_pending_ops=False
                     ) as conn,
                     self._allow_tbl_md_read(),
                 ):
@@ -912,7 +894,7 @@ class Catalog:
                     # we got an error for the last op and can abort this statement: switch to rollback mode
                     exc = e
                     with self.begin_xact(
-                        for_write=True, write_tbl_ids=[tbl_id], convert_db_excs=False, finalize_pending_ops=False
+                        mode=XactMode.WRITE_TBL, tbl_ids=[tbl_id], convert_db_excs=False, finalize_pending_ops=False
                     ) as conn:
                         stmt = (
                             sql.update(schema.Table)
@@ -1129,21 +1111,6 @@ class Catalog:
                 q = q.where(schema.Dir.md['user'].astext == user)
         get_runtime().conn.execute(q)
 
-    def get_dir_path(self, dir_id: UUID) -> Path:
-        """Return path for directory with given id"""
-        assert isinstance(dir_id, UUID)
-        conn = get_runtime().conn
-        names: list[str] = []
-        while True:
-            q = sql.select(schema.Dir).where(schema.Dir.id == dir_id)
-            row = conn.execute(q).one()
-            dir = schema.Dir(**row._mapping)
-            if dir.md['name'] == '':
-                break
-            names.insert(0, dir.md['name'])
-            dir_id = dir.parent_id
-        return Path.parse('/'.join(names), allow_empty_path=True, allow_system_path=True)
-
     def _table_error_counts(self) -> dict[UUID, int]:
         """Returns map from table id to the sum of num_excs across that table's versions."""
         md = schema.TableVersion.md
@@ -1167,7 +1134,7 @@ class Catalog:
         # None otherwise (including for directory entries).
         table_error_count: int | None = None
 
-    @retry_loop(for_write=False)
+    @retry_loop(mode=XactMode.MD_ACCESS)
     def get_dir_contents(
         self, dir_path: Path, recursive: bool = False, with_error_counts: bool = False
     ) -> dict[str, DirEntry]:
@@ -1196,11 +1163,11 @@ class Catalog:
         for row in rows:
             tbl = schema.Table(**row._mapping)
             err_count = error_counts.get(tbl.id, 0) if error_counts is not None else None
-            result[tbl.md['name']] = self.DirEntry(dir=None, dir_entries={}, table=tbl, table_error_count=err_count)
+            result[tbl.name] = self.DirEntry(dir=None, dir_entries={}, table=tbl, table_error_count=err_count)
 
         return result
 
-    @retry_loop(for_write=True)
+    @retry_loop(mode=XactMode.WRITE_TBL)
     def move(self, path: Path, new_path: Path, if_exists: IfExistsParam, if_not_exists: IfNotExistsParam) -> None:
         self._move(path, new_path, if_exists, if_not_exists)
 
@@ -1222,9 +1189,36 @@ class Catalog:
             if isinstance(src_obj, Table):
                 self._move_table(src_obj._id, new_path.name, dest_dir._id)
             elif isinstance(src_obj, Dir):
+                # Re-check cycle under lock: a concurrent move could have made src_obj an ancestor
+                # of dest_dir between globals.move's string-based is_ancestor check and now.
+                self._check_dir_move_creates_cycle(src_obj._id, dest_dir._id)
                 self._move_dir(src_obj._id, new_path.name, dest_dir._id)
             else:
                 raise AssertionError(f'unexpected SchemaObject type: {type(src_obj).__name__}')
+
+    def _check_dir_move_creates_cycle(self, src_dir_id: UUID, dest_parent_id: UUID) -> None:
+        """Raise if moving src_dir to live under dest_parent would create a cycle.
+
+        Walks the parent chain from dest_parent upward in a single recursive CTE; if src_dir
+        appears anywhere in the chain, the move would create a cycle. The single statement is
+        atomic against concurrent dir moves committed mid-walk.
+
+        Must be called inside the write xact, after the relevant parent X-locks are held.
+        """
+        assert self._in_write_xact
+        base = sql.select(schema.Dir.id.label('id'), schema.Dir.parent_id.label('parent_id')).where(
+            schema.Dir.id == dest_parent_id
+        )
+        ancestors = base.cte('ancestors', recursive=True)
+        ancestors = ancestors.union_all(
+            sql.select(schema.Dir.id, schema.Dir.parent_id).where(schema.Dir.id == ancestors.c.parent_id)
+        )
+        q = sql.select(sql.literal(1)).where(ancestors.c.id == src_dir_id).limit(1)
+        if get_runtime().conn.execute(q).first() is not None:
+            raise excs.RequestError(
+                excs.ErrorCode.UNSUPPORTED_OPERATION,
+                f'move(): cannot move directory {src_dir_id} into its own subdirectory',
+            )
 
     def _prepare_dir_op(
         self,
@@ -1424,7 +1418,7 @@ class Catalog:
         Otherwise, creates a new table `t` and returns `t, True` (or raises an exception if the operation fails).
         """
 
-        @retry_loop(for_write=True)
+        @retry_loop(mode=XactMode.WRITE_TBL)
         def create_fn() -> tuple[UUID, bool]:
             import pixeltable.metadata.schema
 
@@ -1437,7 +1431,6 @@ class Catalog:
             assert dir is not None
 
             md, ops = InsertableTable._create(
-                path.name,
                 schema,
                 primary_key=primary_key,
                 comment=comment,
@@ -1448,13 +1441,13 @@ class Catalog:
             )
             tbl_id = UUID(md.tbl_md.tbl_id)
             md.tbl_md.pending_stmt = pixeltable.metadata.schema.TableStatement.CREATE_TABLE
-            self.write_tbl_md(tbl_id, dir._id, md.tbl_md, md.version_md, md.schema_version_md, ops)
+            self.write_tbl_md(tbl_id, dir._id, path.name, md.tbl_md, md.version_md, md.schema_version_md, ops)
             return tbl_id, True
 
         self._roll_forward_ids.clear()
         tbl_id, is_created = create_fn()
         self._roll_forward()
-        with self.begin_xact(for_write=True, write_tbl_ids=[tbl_id]):
+        with self.begin_xact(mode=XactMode.WRITE_TBL, tbl_ids=[tbl_id]):
             tbl = self.get_table_by_id(tbl_id)
             _logger.info(f'Created table {tbl._name()!r}, id={tbl._id}')
             Env.get().console_logger.info(f'Created table {tbl._name()!r}.')
@@ -1476,7 +1469,7 @@ class Catalog:
         media_validation: MediaValidation,
         if_exists: IfExistsParam,
     ) -> Table:
-        @retry_loop(for_write=True)
+        @retry_loop(mode=XactMode.WRITE_TBL)
         def create_fn() -> UUID:
             if not is_snapshot and base.is_mutable():
                 # this is a mutable view of a mutable base; X-lock the base and advance its view_sn before adding
@@ -1500,7 +1493,6 @@ class Catalog:
             dir = self._get_schema_object(path.parent, expected=Dir, raise_if_not_exists=True)
             assert dir is not None
             md, ops = View._create(
-                path.name,
                 base=base,
                 select_list=select_list,
                 additional_columns=additional_columns,
@@ -1515,7 +1507,7 @@ class Catalog:
             )
             tbl_id = UUID(md.tbl_md.tbl_id)
             md.tbl_md.pending_stmt = schema.TableStatement.CREATE_VIEW
-            self.write_tbl_md(tbl_id, dir._id, md.tbl_md, md.version_md, md.schema_version_md, ops)
+            self.write_tbl_md(tbl_id, dir._id, path.name, md.tbl_md, md.version_md, md.schema_version_md, ops)
             return tbl_id
 
         self._roll_forward_ids.clear()
@@ -1526,14 +1518,14 @@ class Catalog:
 
         self._roll_forward()
 
-        @retry_loop(read_tbl_ids=[view_id])
+        @retry_loop(mode=XactMode.MD_ACCESS, tbl_ids=[view_id])
         def _get_tbl() -> Table:
             return self.get_table_by_id(view_id)
 
         return _get_tbl()
 
     def add_columns(self, tbl: TableVersionPath, cols: list[Column]) -> None:
-        @retry_loop(for_write=True, write_tvps=[tbl], lock_mutable_tree=False)
+        @retry_loop(mode=XactMode.WRITE_TBL, tvps=[tbl])
         def add_fn() -> None:
             tv = self._get_tbl_version(TableVersionKey(tbl.tbl_id, None, None), validate_initialized=True)
             md, ops = tv.add_columns_ops(cols)
@@ -1541,6 +1533,7 @@ class Catalog:
             self.write_tbl_md(
                 tbl.tbl_id,
                 dir_id=None,
+                name=None,
                 tbl_md=md.tbl_md,
                 version_md=md.version_md,
                 schema_version_md=md.schema_version_md,
@@ -1670,14 +1663,16 @@ class Catalog:
         q: sql.Executable = sql.select(schema.Table.md).where(schema.Table.id == tbl_id)
         existing_md_row = conn.execute(q).one_or_none()
 
-        # Update md with the given name, current user, and is_replica flag.
-        md = dataclasses.replace(
-            md, tbl_md=dataclasses.replace(md.tbl_md, name=path.name, user=Env.get().user, is_replica=True)
-        )
+        # Update tbl_md with the current user and is_replica flag. The local name is set as a
+        # dedicated column from path.name, not stored in md.
+        md = dataclasses.replace(md, tbl_md=dataclasses.replace(md.tbl_md, user=Env.get().user, is_replica=True))
         if existing_md_row is None:
             # No existing table, so create a new record.
             q = sql.insert(schema.Table.__table__).values(
-                id=tbl_id, dir_id=dir._id, md=dataclasses.asdict(md.tbl_md, dict_factory=schema.md_dict_factory)
+                id=tbl_id,
+                dir_id=dir._id,
+                name=path.name,
+                md=dataclasses.asdict(md.tbl_md, dict_factory=schema.md_dict_factory),
             )
             conn.execute(q)
         elif not existing_md_row.md['is_replica']:
@@ -1749,7 +1744,7 @@ class Catalog:
                     'This is likely due to data corruption in the replicated table.',
                 )
 
-        self.write_tbl_md(UUID(tbl_id), None, new_tbl_md, new_version_md, new_schema_version_md)
+        self.write_tbl_md(UUID(tbl_id), None, None, new_tbl_md, new_version_md, new_schema_version_md)
 
         if is_new_tbl_version and not md.is_pure_snapshot:
             # It's a new version of a table that has a physical store, so we need to create a TableVersion instance.
@@ -1781,7 +1776,7 @@ class Catalog:
         result = conn.execute(q)
         assert result.rowcount == 1, result.rowcount
 
-    @retry_loop(for_write=False)
+    @retry_loop(mode=XactMode.MD_ACCESS)
     def get_table(self, path: Path, if_not_exists: IfNotExistsParam) -> Table | None:
         obj = self._get_schema_object(
             path, expected=Table, raise_if_not_exists=(if_not_exists == IfNotExistsParam.ERROR)
@@ -1797,7 +1792,7 @@ class Catalog:
         return obj
 
     def drop_table(self, path: Path, if_not_exists: IfNotExistsParam, force: bool) -> None:
-        @retry_loop(for_write=True)
+        @retry_loop(mode=XactMode.WRITE_TBL)
         def drop_fn() -> None:
             tbl = self._get_schema_object(
                 path,
@@ -1849,11 +1844,12 @@ class Catalog:
             tbl_id = tbl._id
             is_pure_snapshot = tbl._tbl_version is None
 
-        # capture the path for logging before the drop runs (after drop, tbl is no longer safe to use)
-        tbl_path_repr: str = str(tbl_id) if tbl is None else repr(tbl._path())
         if tbl is not None:
-            self._acquire_dir_xlock(dir_id=tbl._dir_id())
+            self._acquire_dir_xlock(dir_id=self.read_tbl_record(tbl_id).dir_id)
         self._acquire_write_lock(tbl_id=tbl_id)
+
+        # capture the path for logging while still holding the write lock
+        tbl_path_repr: str = str(tbl_id) if tbl is None else repr(tbl._path())
 
         view_ids = self.get_view_ids(tbl_id, for_update=True)
         is_replica = tvp.is_replica()
@@ -1923,6 +1919,7 @@ class Catalog:
                 self.write_tbl_md(
                     tv.id,
                     dir_id=None,
+                    name=None,
                     tbl_md=tv.tbl_md,
                     version_md=tv.version_md if new_version else None,
                     schema_version_md=tv.schema_version_md if new_version else None,
@@ -1961,7 +1958,7 @@ class Catalog:
                 # load the TableVersion instance in order to drop it
                 self._drop_tbl(tvp.base.anchor_to(None), force=False, is_replace=False)
 
-    @retry_loop(for_write=True)
+    @retry_loop(mode=XactMode.WRITE_TBL)
     def create_dir(self, path: Path, if_exists: IfExistsParam, parents: bool) -> Dir:
         return self._create_dir(path, if_exists, parents)
 
@@ -1986,7 +1983,7 @@ class Catalog:
         return dir
 
     def drop_dir(self, path: Path, if_not_exists: IfNotExistsParam, force: bool) -> None:
-        @retry_loop(for_write=True)
+        @retry_loop(mode=XactMode.WRITE_TBL)
         def drop_fn() -> None:
             _, _, schema_obj = self._prepare_dir_op(
                 drop_dir_path=path.parent,
@@ -2060,7 +2057,7 @@ class Catalog:
         if get_runtime().in_xact:
             return self._get_tbl_version(key, validate_initialized=validate_initialized)
 
-        @retry_loop(for_write=False)
+        @retry_loop(mode=XactMode.MD_ACCESS)
         def do_get_tbl_version() -> TableVersion | None:
             return self._get_tbl_version(key, validate_initialized=validate_initialized)
 
@@ -2103,7 +2100,7 @@ class Catalog:
             reload = False
 
             if tv.anchor_tbl_id is None:
-                # live non-replica table; compare our cached TableMd.current_version/view_sn to what's stored
+                # live non-replica table; compare cached TableMd.current_version/view_sn to what's stored
                 is_versioned = row.md.get('is_versioned', True)
                 current_version = row.md['current_version']
                 view_sn = row.md['view_sn']
@@ -2173,7 +2170,72 @@ class Catalog:
         dir_record = schema.Dir(**row._mapping)
         return Dir(dir_record.id)
 
+    def read_dir_path(self, dir_id: UUID) -> list[str]:
+        """Path components for the given directory, from root to the dir itself.
+
+        Returns an empty list for the root directory. Atomic: one SQL statement.
+        """
+        assert get_runtime().in_xact
+        # recursive CTE walking from dir_id up through parent_id pointers
+        base = sql.select(
+            schema.Dir.parent_id.label('parent_id'),
+            schema.Dir.md['name'].astext.label('name'),
+            sql.literal(0).label('depth'),
+        ).where(schema.Dir.id == dir_id)
+        ancestors = base.cte('ancestors', recursive=True)
+        ancestors = ancestors.union_all(
+            sql.select(
+                schema.Dir.parent_id, schema.Dir.md['name'].astext, (ancestors.c.depth + 1).label('depth')
+            ).where(schema.Dir.id == ancestors.c.parent_id)
+        )
+        q = sql.select(ancestors.c.name).order_by(ancestors.c.depth.desc())
+        rows = get_runtime().conn.execute(q).all()
+        if not rows:
+            raise excs.NotFoundError(excs.ErrorCode.DIRECTORY_NOT_FOUND, f'Directory not found: {dir_id}')
+        # root has md.name == ''; drop it from the components list
+        return [r[0] for r in rows if r[0] != '']
+
+    def read_tbl_path(self, tbl_id: UUID) -> list[str]:
+        """Path components for the given table: dir names from root, followed by the table name.
+
+        Atomic: one SQL statement.
+        """
+        assert get_runtime().in_xact
+        # recursive CTE walking from the table's dir up through parent_id pointers
+        base = (
+            sql.select(
+                schema.Dir.parent_id.label('parent_id'),
+                schema.Dir.md['name'].astext.label('name'),
+                sql.literal(0).label('depth'),
+            )
+            .select_from(schema.Dir.__table__.join(schema.Table.__table__, schema.Table.dir_id == schema.Dir.id))
+            .where(schema.Table.id == tbl_id)
+        )
+        ancestors = base.cte('ancestors', recursive=True)
+        ancestors = ancestors.union_all(
+            sql.select(
+                schema.Dir.parent_id, schema.Dir.md['name'].astext, (ancestors.c.depth + 1).label('depth')
+            ).where(schema.Dir.id == ancestors.c.parent_id)
+        )
+        tbl_name_subq = sql.select(schema.Table.name).where(schema.Table.id == tbl_id).scalar_subquery()
+        q = sql.select(tbl_name_subq, ancestors.c.name).order_by(ancestors.c.depth.desc())
+        rows = get_runtime().conn.execute(q).all()
+        if not rows:
+            raise excs.NotFoundError(excs.ErrorCode.TABLE_NOT_FOUND, self._dropped_tbl_error_msg(tbl_id))
+        tbl_name = rows[0][0]
+        dir_names = [r[1] for r in rows if r[1] != '']
+        return [*dir_names, tbl_name]
+
+    def read_tbl_name(self, tbl_id: UUID) -> str:
+        """Current name of the table. Single SELECT, always fresh."""
+        assert get_runtime().in_xact
+        row = get_runtime().conn.execute(sql.select(schema.Table.name).where(schema.Table.id == tbl_id)).one_or_none()
+        if row is None:
+            raise excs.NotFoundError(excs.ErrorCode.TABLE_NOT_FOUND, self._dropped_tbl_error_msg(tbl_id))
+        return row[0]
+
     def read_tbl_record(self, tbl_id: UUID) -> schema.Table:
+        assert get_runtime().in_xact
         conn = get_runtime().conn
         row = conn.execute(sql.select(schema.Table).where(schema.Table.id == tbl_id)).one_or_none()
         if row is None:
@@ -2181,6 +2243,7 @@ class Catalog:
         return schema.Table(**row._mapping)
 
     def read_dir_record(self, dir_id: UUID) -> schema.Dir:
+        assert get_runtime().in_xact
         conn = get_runtime().conn
         row = conn.execute(sql.select(schema.Dir).where(schema.Dir.id == dir_id)).one_or_none()
         if row is None:
@@ -2188,23 +2251,9 @@ class Catalog:
         return schema.Dir(**row._mapping)
 
     def _move_table(self, tbl_id: UUID, new_name: str, new_dir_id: UUID) -> None:
-        """Update dir_id/name for tbl_id."""
-        stmt = (
-            sql.update(schema.Table)
-            .where(schema.Table.id == tbl_id)
-            .values(
-                {
-                    schema.Table.dir_id: new_dir_id,
-                    schema.Table.md: sql.func.jsonb_set(
-                        schema.Table.md, pg_array(['name']), sql.func.to_jsonb(new_name)
-                    ),
-                }
-            )
-        )
-        result = get_runtime().conn.execute(stmt)
-        assert result.rowcount == 1, result.rowcount
-        # TV.table_md.name is now stale
-        self._clear_tv_cache(TableVersionKey(tbl_id, None, None))
+        """Update the Table record's identity (dir_id, name). Does not touch the md JSON column."""
+        stmt = sql.update(schema.Table).where(schema.Table.id == tbl_id).values(dir_id=new_dir_id, name=new_name)
+        get_runtime().conn.execute(stmt)
 
     def _move_dir(self, dir_id: UUID, new_name: str, new_parent_id: UUID) -> None:
         """Update parent_id/name for dir_id."""
@@ -2414,7 +2463,7 @@ class Catalog:
 
         return tvp
 
-    @retry_loop(for_write=False)
+    @retry_loop(mode=XactMode.MD_ACCESS)
     def collect_tbl_history(self, tbl_id: UUID, n: int | None) -> list[TableVersionMd]:
         return self._collect_tbl_history(tbl_id, n)
 
@@ -2557,6 +2606,7 @@ class Catalog:
         self,
         tbl_id: UUID,
         dir_id: UUID | None,
+        name: str | None,
         tbl_md: schema.TableMd | None,
         version_md: schema.VersionMd | None,
         schema_version_md: schema.SchemaVersionMd | None,
@@ -2569,7 +2619,8 @@ class Catalog:
         Args:
             tbl_id: UUID of the table to store metadata for.
             dir_id: If specified, the tbl_md will be added to the given directory; if None, the table must already exist
-            tbl_md: If specified, `tbl_md` will be inserted, or updated (only one such record can exist per UUID)
+            name: must be specified together with dir_id (i.e. for INSERTs); ignored for UPDATEs
+            tbl_md: If specified, tbl_md will be inserted, or updated (only one such record can exist per UUID)
             version_md: inserted as a new record if present
             schema_version_md: will be inserted as a new record if present
 
@@ -2599,8 +2650,12 @@ class Catalog:
 
             if dir_id is not None:
                 # We are inserting a record while creating a new table.
+                assert name is not None
                 tbl_record = schema.Table(
-                    id=tbl_id, dir_id=dir_id, md=dataclasses.asdict(tbl_md, dict_factory=schema.md_dict_factory)
+                    id=tbl_id,
+                    dir_id=dir_id,
+                    name=name,
+                    md=dataclasses.asdict(tbl_md, dict_factory=schema.md_dict_factory),
                 )
                 session.add(tbl_record)
             else:
@@ -2874,7 +2929,7 @@ class Catalog:
         """
         Creates a catalog record (root directory) for the specified user, if one does not already exist.
         """
-        with get_runtime().begin_xact():
+        with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED):
             session = get_runtime().session
             # See if there are any directories in the catalog matching the specified user.
             if session.query(schema.Dir).where(schema.Dir.md['user'].astext == user).count() > 0:
@@ -2979,7 +3034,7 @@ class Catalog:
         This function can and should be extended to perform more checks.
         """
         all_contents = self.get_dir_contents(ROOT_PATH, recursive=True)
-        with self.begin_xact(for_write=False), self._allow_tbl_md_read():
+        with self.begin_xact(mode=XactMode.MD_ACCESS), self._allow_tbl_md_read():
             for entry in all_contents.values():
                 if entry.table is None:
                     continue

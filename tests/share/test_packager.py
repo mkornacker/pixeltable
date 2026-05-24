@@ -24,7 +24,7 @@ from pixeltable.env import Env
 from pixeltable.index.embedding_index import EmbeddingIndex
 from pixeltable.metadata import schema
 from pixeltable.plan import FromClause
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import IsolationLevel, XactMode, get_runtime
 from pixeltable.share.packager import TablePackager, TableRestorer
 from pixeltable.utils.local_store import LocalStore, TempStore
 from tests.conftest import clean_db
@@ -263,7 +263,7 @@ class TestPackager:
         get_runtime().catalog.validate_store()
 
     def __extract_store_col_schema(self, tbl: pxt.Table) -> set[tuple[str, str]]:
-        with get_runtime().catalog.begin_xact(read_tvps=[tbl._tbl_version_path]):
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tvps=[tbl._tbl_version_path]):
             store_tbl_name = tbl._tbl_version_path.tbl_version.get().store_tbl._storage_name()
             sql_text = (
                 f'SELECT column_name, data_type FROM information_schema.columns WHERE table_name = {store_tbl_name!r}'
@@ -272,7 +272,7 @@ class TestPackager:
             return {(col_name, data_type) for col_name, data_type in result}
 
     def __extract_store_idx_schema(self, tbl: pxt.Table) -> set[tuple[str, str]]:
-        with get_runtime().catalog.begin_xact(read_tvps=[tbl._tbl_version_path]):
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tvps=[tbl._tbl_version_path]):
             store_tbl_name = tbl._tbl_version_path.tbl_version.get().store_tbl._storage_name()
             sql_text = f'SELECT indexname, indexdef FROM pg_indexes WHERE tablename = {store_tbl_name!r}'
             result = get_runtime().conn.execute(sql.text(sql_text)).fetchall()
@@ -302,7 +302,7 @@ class TestPackager:
         performance implications that are not user visible.
         """
         tv = tbl._tbl_version_path.tbl_version.get()
-        with get_runtime().begin_xact():
+        with get_runtime().begin_store_xact(isolation_level=IsolationLevel.REPEATABLE_READ):
             head_version = get_runtime().catalog._collect_tbl_history(tbl._id, n=1)[0].version_md.version
             for idx_info in tv.idxs_by_name.values():
                 if isinstance(idx_info.idx, EmbeddingIndex):

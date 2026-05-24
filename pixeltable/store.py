@@ -16,7 +16,7 @@ from pixeltable.env import Env
 from pixeltable.exec import ExecNode
 from pixeltable.index.btree import BtreeIndex
 from pixeltable.metadata import schema
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import IsolationLevel, get_runtime
 from pixeltable.utils.exception_handler import run_cleanup
 from pixeltable.utils.sql import log_explain, log_stmt
 from pixeltable.utils.uuid import uuid7
@@ -121,35 +121,36 @@ class StoreBase:
         """Create and return rowid columns"""
 
     def _create_system_columns(self) -> list[sql.Column]:
-        """Create and return system columns"""
+        """Create and return system columns. Must be called inside an active transaction."""
         rowid_cols: list[sql.Column]
         if self._store_tbl_exists():
             # derive our rowid Columns from the existing table, without having to access self.base.store_tbl:
             # self.base may not exist anymore (both this table and our base got dropped in the same transaction, and
             # the base was finalized before this table)
-            with get_runtime().begin_xact(for_write=False) as conn:
-                q = (
-                    f'SELECT column_name FROM information_schema.columns WHERE table_name = {self._storage_name()!r} '
-                    'ORDER BY ordinal_position'
-                )
-                # System columns on a versioned table: rowid, [pos_0, pos_1, ...], v_min, v_max
-                # System columns on an unversioned table: rowid, [pos_0, pos_1, ...]
-                # System columns are always followed by at least one user column
-                col_names = [row[0] for row in conn.execute(sql.text(q)).fetchall()]
-                assert len(col_names) > 1, col_names
-                assert not col_names[-1].startswith('pos_'), col_names
+            assert get_runtime().in_xact
+            conn = get_runtime().conn
+            q = (
+                f'SELECT column_name FROM information_schema.columns WHERE table_name = {self._storage_name()!r} '
+                'ORDER BY ordinal_position'
+            )
+            # System columns on a versioned table: rowid, [pos_0, pos_1, ...], v_min, v_max
+            # System columns on an unversioned table: rowid, [pos_0, pos_1, ...]
+            # System columns are always followed by at least one user column
+            col_names = [row[0] for row in conn.execute(sql.text(q)).fetchall()]
+            assert len(col_names) > 1, col_names
+            assert not col_names[-1].startswith('pos_'), col_names
 
-                rowid_cols = []
-                for i, col_name in enumerate(col_names):
-                    if i == 0:
-                        assert col_name == 'rowid', col_names
-                        col_type = self._rowid_col_type()
-                    elif col_name.startswith('pos_'):
-                        col_type = sql.BigInteger()
-                    else:
-                        # reached user columns
-                        break
-                    rowid_cols.append(sql.Column(col_name, col_type, nullable=False, autoincrement=False))
+            rowid_cols = []
+            for i, col_name in enumerate(col_names):
+                if i == 0:
+                    assert col_name == 'rowid', col_names
+                    col_type = self._rowid_col_type()
+                elif col_name.startswith('pos_'):
+                    col_type = sql.BigInteger()
+                else:
+                    # reached user columns
+                    break
+                rowid_cols.append(sql.Column(col_name, col_type, nullable=False, autoincrement=False))
         else:
             rowid_cols = self._create_rowid_columns()
 
@@ -253,7 +254,7 @@ class StoreBase:
         enclosing transaction (and the ability to run additional statements in that same transaction).
         """
         while True:
-            with get_runtime().begin_xact(for_write=True) as conn:
+            with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED) as conn:
                 try:
                     if wait_for_table and not Env.get().is_using_cockroachdb:
                         # Try to lock the table to make sure that it exists. This needs to run in the same transaction
@@ -282,14 +283,13 @@ class StoreBase:
                         raise
 
     def _store_tbl_exists(self) -> bool:
-        """Returns True if the store table exists, False otherwise."""
-        with get_runtime().begin_xact(for_write=False) as conn:
-            q = (
-                'SELECT COUNT(*) FROM pg_catalog.pg_tables '
-                f"WHERE schemaname = 'public' AND tablename = {self._storage_name()!r}"
-            )
-            res = conn.execute(sql.text(q)).scalar_one()
-            return res == 1
+        """Returns True if the store table exists. Must be called inside an active transaction."""
+        assert get_runtime().in_xact
+        q = (
+            'SELECT COUNT(*) FROM pg_catalog.pg_tables '
+            f"WHERE schemaname = 'public' AND tablename = {self._storage_name()!r}"
+        )
+        return get_runtime().conn.execute(sql.text(q)).scalar_one() == 1
 
     def create(self) -> None:
         """
@@ -338,7 +338,7 @@ class StoreBase:
         idx_info = self.tbl_version.get().idxs[idx_id]
         store_index_name = self.tbl_version.get()._store_idx_name(idx_id)
         stmt = idx_info.idx.sa_drop_stmt(store_index_name, idx_info.val_col.sa_col)
-        with get_runtime().begin_xact(for_write=True) as conn:
+        with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED) as conn:
             try:
                 conn.execute(sql.text(str(stmt)))
             except (sql.exc.IntegrityError, sql.exc.ProgrammingError) as e:
@@ -349,7 +349,7 @@ class StoreBase:
 
     def validate(self) -> None:
         """Validate store table against self.table_version"""
-        with get_runtime().begin_xact() as conn:
+        with get_runtime().begin_store_xact(isolation_level=IsolationLevel.REPEATABLE_READ) as conn:
             # check that all columns are present
             q = f'SELECT column_name FROM information_schema.columns WHERE table_name = {self._storage_name()!r}'
             store_col_info = {row[0] for row in conn.execute(sql.text(q)).fetchall()}
@@ -442,7 +442,7 @@ class StoreBase:
             table_rows: list[tuple[Any]] = []
             with exec_plan:
                 progress_reporter = exec_plan.ctx.add_progress_reporter(
-                    f'Column values written (table {self.tbl_version.get().name!r})', 'rows'
+                    f'Column values written (table {self.tbl_version.get().name()!r})', 'rows'
                 )
 
                 # insert rows from exec_plan into temp table
@@ -524,7 +524,7 @@ class StoreBase:
 
         with exec_plan:
             progress_reporter = exec_plan.ctx.add_progress_reporter(
-                f'Rows written (table {self.tbl_version.get().name!r})', 'rows'
+                f'Rows written (table {self.tbl_version.get().name()!r})', 'rows'
             )
 
             for row_batch in exec_plan:

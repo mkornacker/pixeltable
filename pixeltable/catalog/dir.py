@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pixeltable.env import Env
 from pixeltable.metadata import schema
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 
 from .schema_object import SchemaObject
 
@@ -35,17 +35,11 @@ class Dir(SchemaObject):
 
     def _name(self) -> str:
         cat = get_runtime().catalog
-        with cat.begin_xact(for_write=False):
-            return cat.read_dir_record(self._id).md['name']
-
-    def _dir_id(self) -> UUID | None:
-        cat = get_runtime().catalog
-        with cat.begin_xact(for_write=False):
-            return cat.read_dir_record(self._id).parent_id
+        with cat.begin_xact(mode=XactMode.MD_ACCESS):
+            components = cat.read_dir_path(self._id)
+            return components[-1] if components else ''
 
     def _path(self) -> str:
-        """Returns the path to this schema object."""
-        if self._dir_id() is None:
-            # we're the root dir
-            return ''
-        return super()._path()
+        cat = get_runtime().catalog
+        with cat.begin_xact(mode=XactMode.MD_ACCESS):
+            return '/'.join(cat.read_dir_path(self._id))

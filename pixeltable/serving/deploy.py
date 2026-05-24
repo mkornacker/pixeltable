@@ -15,7 +15,7 @@ from pathspec import PathSpec
 import pixeltable as pxt
 from pixeltable import config, exceptions as excs, metadata
 from pixeltable.env import Env
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 from pixeltable.serving._config import lookup_deployment_config, lookup_service_config
 
 _logger = logging.getLogger('pixeltable')
@@ -173,7 +173,7 @@ def _export_tables_md(table_paths: set[str]) -> dict[str, Any]:
 
     # Get the md for all ancestors of all such tables.
     catalog = get_runtime().catalog
-    with catalog.begin_xact(for_write=False):
+    with catalog.begin_xact(mode=XactMode.MD_ACCESS):
         tables_md = [catalog.load_md_for_export(tbl, as_replica=False) for tbl in tables]
 
     # The ancestor md is returned as: primary table first, followed by ancestors in descending order.

@@ -29,7 +29,7 @@ import pixeltable.type_system as ts
 from pixeltable._query import ResultSet
 from pixeltable.catalog import retry_loop
 from pixeltable.env import Env
-from pixeltable.runtime import get_runtime, reset_runtime
+from pixeltable.runtime import IsolationLevel, XactMode, get_runtime, reset_runtime
 from pixeltable.types import ColumnSpec
 from pixeltable.utils import sha256sum
 from pixeltable.utils.console_output import ConsoleMessageFilter, ConsoleOutputHandler
@@ -882,7 +882,7 @@ class ReloadTester:
         # enumerate(): the list index is useful for debugging
         for _idx, (query_dict, result_set) in enumerate(self.query_info):
 
-            @retry_loop()
+            @retry_loop(mode=XactMode.MD_ACCESS)
             def query_from_dict() -> pxt.Query:
                 return pxt.Query.from_dict(query_dict)
 
@@ -965,7 +965,7 @@ class DummyIterator2(pxt.PxtIterator[DummyIterator2Out]):
 def list_store_indexes(t: pxt.Table) -> list[str]:
     """Return all index names in the store for the given table."""
     sa_tbl_name = t._tbl_version.get().store_tbl._storage_name()
-    with get_runtime().begin_xact() as conn:
+    with get_runtime().begin_store_xact(isolation_level=IsolationLevel.REPEATABLE_READ) as conn:
         result = conn.execute(
             sql.text(f"SELECT indexname FROM pg_indexes WHERE tablename = '{sa_tbl_name}'")
         ).fetchall()

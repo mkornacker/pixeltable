@@ -12,7 +12,7 @@ import pixeltable.type_system as ts
 from pixeltable import exprs, func
 from pixeltable.catalog.globals import _POS_COLUMN_NAME
 from pixeltable.func.iterator import IteratorOutput
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 from pixeltable.types import ColumnSpec
 
 from .column import Column
@@ -76,7 +76,6 @@ class View(Table):
     @classmethod
     def _create(
         cls,
-        name: str,
         base: TableVersionPath,
         select_list: list[tuple[exprs.Expr, str | None]] | None,
         additional_columns: Mapping[str, type | ColumnSpec | exprs.Expr],
@@ -193,7 +192,6 @@ class View(Table):
         )
 
         md = TableVersion.create_initial_md(
-            name,
             columns,
             comment,
             custom_metadata,
@@ -274,9 +272,10 @@ class View(Table):
         md['is_view'] = True
         md['is_snapshot'] = self._tbl_version_path.is_snapshot()
         if self._is_anonymous_snapshot():
-            # Update name and path with version qualifiers.
-            md['name'] = f'{self._name()}:{self._tbl_version_path.version()}'
-            md['path'] = f'{self._path()}:{self._tbl_version_path.version()}'
+            # Update name and path with version qualifiers, reusing the atomic snapshot from super().
+            version = self._tbl_version_path.version()
+            md['name'] = f'{md["name"]}:{version}'
+            md['path'] = f'{md["path"]}:{version}'
         base_tbl_id = self._base_tbl_id
         if base_tbl_id is not None:
             base_tbl = self._get_base_table()
@@ -336,7 +335,7 @@ class View(Table):
         base_tbl_id = self._base_tbl_id
         if base_tbl_id is None:
             return None
-        with get_runtime().catalog.begin_xact(read_tbl_ids=[base_tbl_id]):
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tbl_ids=[base_tbl_id]):
             return get_runtime().catalog.get_table_by_id(base_tbl_id)
 
     @property

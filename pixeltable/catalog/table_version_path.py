@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from pixeltable.metadata import schema
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 
 from .column import Column
 from .globals import MediaValidation, QColumnId
@@ -88,7 +88,7 @@ class TableVersionPath:
         if origin_catalog is cat and cached is not None and (not get_runtime().in_xact or cached.is_validated):
             return cached
 
-        with get_runtime().catalog.begin_xact(for_write=False, read_tbl_ids=[self.tbl_version.id]):
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tbl_ids=[self.tbl_version.id]):
             new_tv = self.tbl_version.get()
         self._local.cached_tbl_version = new_tv
         self._local.origin_catalog = cat
@@ -134,7 +134,7 @@ class TableVersionPath:
 
     def tbl_name(self) -> str:
         """Return the name of the table/view that this path represents"""
-        return self._cached_tv().name
+        return self._cached_tv().name()
 
     def path_len(self) -> int:
         """Return the length of the path"""

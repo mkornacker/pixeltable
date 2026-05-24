@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import sqlalchemy as sql
 
 import pixeltable.metadata.schema as schema
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import IsolationLevel, get_runtime
 from pixeltable.utils import fault_injection
 from pixeltable.utils.fault_injection import FaultLocation
 
@@ -92,12 +92,12 @@ class CreateStoreTableOp(TableOp):
 
     def exec(self, tv: TableVersion | None) -> None:
         assert not get_runtime().in_xact
-        with get_runtime().begin_xact():
+        with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED):
             tv.store_tbl.create()
 
     def undo(self, tv: TableVersion | None) -> None:
         assert not get_runtime().in_xact
-        with get_runtime().begin_xact():
+        with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED):
             tv.store_tbl.drop()
 
 
@@ -111,13 +111,13 @@ class CreateStoreIdxsOp(TableOp):
     def exec(self, tv: TableVersion | None) -> None:
         assert not get_runtime().in_xact
         for idx_id in self.idx_ids:
-            with get_runtime().begin_xact():
+            with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED):
                 tv.store_tbl.create_index(idx_id)
 
     def undo(self, tv: TableVersion | None) -> None:
         assert not get_runtime().in_xact
         for idx_id in self.idx_ids:
-            with get_runtime().begin_xact():
+            with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED):
                 tv.store_tbl.drop_index(idx_id)
 
 
@@ -141,7 +141,7 @@ class LoadViewOp(TableOp):
             _, row_counts, _ = tv.store_tbl.insert_rows(plan, v_min=tv.version)
         status = UpdateStatus(row_count_stats=row_counts)
         get_runtime().catalog.store_update_status(tv.id, tv.version, status)
-        _logger.debug(f'Loaded view {tv.name} with {row_counts.num_rows} rows')
+        _logger.debug(f'Loaded view {tv.name()} with {row_counts.num_rows} rows')
 
     def undo(self, tv: TableVersion | None) -> None:
         from pixeltable.utils.filecache import FileCache
@@ -215,7 +215,7 @@ class CreateColumnMdOp(TableOp):
         assert get_runtime().in_xact
         for col_id in self.column_ids:
             del tv._tbl_md.column_md[col_id]
-        get_runtime().catalog.write_tbl_md(tv.id, None, tv._tbl_md, None, None, [])
+        get_runtime().catalog.write_tbl_md(tv.id, None, None, tv._tbl_md, None, None, [])
 
 
 @dataclasses.dataclass
@@ -228,13 +228,13 @@ class CreateStoreColumnsOp(TableOp):
     def exec(self, tv: TableVersion | None) -> None:
         assert not get_runtime().in_xact
         for col_id in self.column_ids:
-            with get_runtime().begin_xact():
+            with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED):
                 tv.store_tbl.add_column(tv.cols_by_id[col_id], if_not_exists=True)
 
     def undo(self, tv: TableVersion | None) -> None:
         assert not get_runtime().in_xact
         for col_id in self.column_ids:
-            with get_runtime().begin_xact():
+            with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED):
                 tv.store_tbl.drop_column(tv.cols_by_id[col_id], if_exists=True)
 
 
@@ -264,7 +264,7 @@ class DropStoreTableOp(TableOp):
         from pixeltable.store import StoreBase
 
         assert not get_runtime().in_xact
-        with get_runtime().begin_xact() as conn:
+        with get_runtime().begin_store_xact(isolation_level=IsolationLevel.READ_COMMITTED) as conn:
             drop_stmt = f'DROP TABLE IF EXISTS {StoreBase.storage_name(uuid.UUID(self.tbl_id), self.is_view)}'
             conn.execute(sql.text(drop_stmt))
 

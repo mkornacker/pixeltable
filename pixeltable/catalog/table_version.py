@@ -264,10 +264,11 @@ class TableVersion:
 
     @property
     def versioned_name(self) -> str:
+        name = self.name()
         if self.effective_version is None:
-            return self.name
+            return name
         else:
-            return f'{self.name}:{self.effective_version}'
+            return f'{name}:{self.effective_version}'
 
     def __repr__(self) -> str:
         version_info = ''
@@ -276,7 +277,7 @@ class TableVersion:
                 f', effective_version={self.effective_version}, '
                 f'anchor_tbl_id={self.anchor_tbl_id}, version={self.version}'
             )
-        return f'TableVersion(id={self.id!r}, name={self.name!r}, is_versioned={self.is_versioned}{version_info})'
+        return f'TableVersion(id={self.id!r}, name={self.name()!r}, is_versioned={self.is_versioned}{version_info})'
 
     @property
     def handle(self) -> 'TableVersionHandle':
@@ -287,7 +288,6 @@ class TableVersion:
     @classmethod
     def create_initial_md(
         cls,
-        name: str,
         cols: list[Column],
         comment: str | None,
         custom_metadata: Any,
@@ -358,7 +358,6 @@ class TableVersion:
 
         tbl_md = schema.TableMd(
             tbl_id=tbl_id_str,
-            name=name,
             user=user,
             is_replica=False,
             current_version=0,
@@ -568,7 +567,7 @@ class TableVersion:
             col_name = schema_col_md.name if schema_col_md is not None else '<unnamed>'
             message = '\n'.join(
                 [
-                    f'The computed column {col_name!r} in table {self.name!r} is no longer valid.',
+                    f'The computed column {col_name!r} in table {self.name()!r} is no longer valid.',
                     value_expr.validation_error,
                     'You can continue to query existing data from this column, but evaluating it on new data will raise an error.',  # noqa: E501
                 ]
@@ -637,6 +636,7 @@ class TableVersion:
         get_runtime().catalog.write_tbl_md(
             self.id,
             None,
+            None,
             self._tbl_md,
             self._version_md if new_version else None,
             self._schema_version_md if new_schema_version else None,
@@ -652,7 +652,7 @@ class TableVersion:
         self.bump_version(bump_schema_version=True)
         status = self._add_index(col, idx_name, idx)
         self._write_md(new_version=True, new_schema_version=True)
-        _logger.info(f'Added index {idx_name} on column {col.name} to table {self.name}')
+        _logger.info(f'Added index {idx_name} on column {col.name} to table {self.name()}')
         return status
 
     @classmethod
@@ -757,7 +757,7 @@ class TableVersion:
 
         self._drop_columns([idx_info.val_col, idx_info.undo_col])
         self._write_md(new_version=True, new_schema_version=True)
-        _logger.info(f'Dropped index {idx_md.name} on table {self.name}')
+        _logger.info(f'Dropped index {idx_md.name} on table {self.name()}')
 
     def add_columns_ops(self, cols: Iterable[Column]) -> tuple[TableVersionMd, list[TableOp]]:
         """Adds columns to the table."""
@@ -781,7 +781,7 @@ class TableVersion:
                 if row_count > 0:
                     raise excs.RequestError(
                         excs.ErrorCode.UNSUPPORTED_OPERATION,
-                        f'Cannot add non-nullable column {col.name!r} to table {self.name!r} with existing rows',
+                        f'Cannot add non-nullable column {col.name!r} to table {self.name()!r} with existing rows',
                     )
             col.tbl_handle = self.handle
             col.id = self.next_col_id()
@@ -887,7 +887,7 @@ class TableVersion:
             self._create_index(col, val_col, undo_col, idx_name=None, idx=idx)
         self.update_status = status
         self._write_md(new_version=True, new_schema_version=True)
-        _logger.info(f'Added columns {[col.name for col in cols]} to table {self.name}, new version: {self.version}')
+        _logger.info(f'Added columns {[col.name for col in cols]} to table {self.name()}, new version: {self.version}')
 
         duration = time.perf_counter() - start_ts
         rate_str = f' ({status.num_rows / duration:.2f} rows/s)' if duration > 0 and status.num_rows > 0 else ''
@@ -914,7 +914,7 @@ class TableVersion:
             if not col.col_type.nullable and not col.is_computed and row_count > 0:
                 raise excs.RequestError(
                     excs.ErrorCode.UNSUPPORTED_OPERATION,
-                    f'Cannot add non-nullable column {col.name!r} to table {self.name!r} with existing rows',
+                    f'Cannot add non-nullable column {col.name!r} to table {self.name()!r} with existing rows',
                 )
 
         num_excs = 0
@@ -969,7 +969,7 @@ class TableVersion:
         # TODO: what to do about system columns with exceptions?
         row_counts = RowCountStats(upd_rows=row_count, num_excs=num_excs, computed_values=0)  # add_columns
         return UpdateStatus(
-            cols_with_excs=[f'{col.get_tbl().name}.{col.name}' for col in cols_with_excs if col.name is not None],
+            cols_with_excs=[f'{col.get_tbl().name()}.{col.name}' for col in cols_with_excs if col.name is not None],
             row_count_stats=row_counts,
         )
 
@@ -1008,7 +1008,7 @@ class TableVersion:
 
         self._drop_columns(dropped_cols)
         self._write_md(new_version=True, new_schema_version=True)
-        _logger.info(f'Dropped column {col.name} from table {self.name}, new version: {self.version}')
+        _logger.info(f'Dropped column {col.name} from table {self.name()}, new version: {self.version}')
 
     def _drop_columns(self, cols: Iterable[Column]) -> None:
         """Mark columns as dropped"""
@@ -1038,7 +1038,7 @@ class TableVersion:
         assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
         if not self.is_mutable:
             raise excs.RequestError(
-                excs.ErrorCode.UNSUPPORTED_OPERATION, f'Cannot rename column for immutable table {self.name!r}'
+                excs.ErrorCode.UNSUPPORTED_OPERATION, f'Cannot rename column for immutable table {self.name()!r}'
             )
         col = self.path.get_column(old_name)
         if col is None:
@@ -1060,10 +1060,10 @@ class TableVersion:
         self.bump_version(bump_schema_version=True)
 
         self._write_md(new_version=True, new_schema_version=True)
-        _logger.info(f'Renamed column {old_name} to {new_name} in table {self.name}, new version: {self.version}')
+        _logger.info(f'Renamed column {old_name} to {new_name} in table {self.name()}, new version: {self.version}')
 
     def set_comment(self, new_comment: str | None) -> None:
-        _logger.info(f'[{self.name}] Updating comment: {new_comment}')
+        _logger.info(f'[{self.name()}] Updating comment: {new_comment}')
         self.comment = new_comment
         self._create_schema_version()
 
@@ -1072,7 +1072,7 @@ class TableVersion:
         # we're creating a new schema version
         self.bump_version(bump_schema_version=True)
         self._write_md(new_version=True, new_schema_version=True)
-        _logger.info(f'[{self.name}] Updating table schema to version: {self.version}')
+        _logger.info(f'[{self.name()}] Updating table schema to version: {self.version}')
 
     def insert(
         self,
@@ -1138,7 +1138,7 @@ class TableVersion:
             exec_plan, v_min=self.version, rowids=rowids, abort_on_exc=abort_on_exc, return_rows=return_rows
         )
         result = UpdateStatus(
-            cols_with_excs=[f'{self.name}.{self.cols_by_id[cid].name}' for cid in cols_with_excs],
+            cols_with_excs=[f'{self.name()}.{self.cols_by_id[cid].name}' for cid in cols_with_excs],
             rows=rows,
             row_count_stats=row_counts,
         )
@@ -1155,7 +1155,7 @@ class TableVersion:
         if self.is_versioned:
             self.update_status = result
             self._write_md(new_version=True, new_schema_version=False)
-            _logger.info(f'TableVersion {self.name}: new version {self.version}')
+            _logger.info(f'TableVersion {self.name()}: new version {self.version}')
         if print_stats:
             exec_plan.ctx.profile.print(num_rows=result.num_rows)
         return result
@@ -1390,7 +1390,7 @@ class TableVersion:
             )
             result += UpdateStatus(
                 row_count_stats=row_counts.insert_to_update(),
-                cols_with_excs=[f'{self.name}.{self.cols_by_id[cid].name}' for cid in cols_with_excs],
+                cols_with_excs=[f'{self.name()}.{self.cols_by_id[cid].name}' for cid in cols_with_excs],
                 rows=rows,
             )
 
@@ -1584,7 +1584,7 @@ class TableVersion:
         # Do this at the end, after all DB operations have completed.
         # TODO: The transaction could still fail. Really this should be done via PendingTableOps.
         self.delete_media(tbl_version=old_version)
-        _logger.info(f'TableVersion {self.name!r}: reverted to version {self.version}')
+        _logger.info(f'TableVersion {self.name()!r}: reverted to version {self.version}')
 
     def _init_external_stores(self) -> None:
         from pixeltable.io.external_store import ExternalStore
@@ -1643,9 +1643,18 @@ class TableVersion:
     def view_md(self) -> schema.ViewMd | None:
         return self._tbl_md.view_md
 
-    @property
     def name(self) -> str:
-        return self._tbl_md.name
+        """Current name of this table from the catalog. One SELECT per call.
+
+        Method rather than property since the value is not cached: it lives in the Table.name
+        column on disk and can be mutated by pxt.move() without bumping any version field. Opens
+        a short MD_ACCESS xact if not already inside one.
+        """
+        from pixeltable.runtime import XactMode
+
+        cat = get_runtime().catalog
+        with cat.begin_xact(mode=XactMode.MD_ACCESS):
+            return cat.read_tbl_name(self.id)
 
     @property
     def user(self) -> str | None:
@@ -1793,7 +1802,7 @@ class TableVersion:
         return self.is_mutable and not self.is_view
 
     def display_str(self) -> str:
-        return f'{"Table" if self.is_insertable else "View"} {self.name!r}'
+        return f'{"Table" if self.is_insertable else "View"} {self.name()!r}'
 
     def is_iterator_column(self, col: Column) -> bool:
         """Returns True if col is produced by an iterator (including the pos column)"""

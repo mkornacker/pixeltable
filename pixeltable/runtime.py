@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import enum
 import logging
 import threading
 from contextlib import contextmanager
@@ -25,6 +26,37 @@ _thread_local = threading.local()
 
 _XACT_ISOLATION_LEVEL = 'READ COMMITTED'
 
+
+class IsolationLevel(enum.Enum):
+    """Postgres transaction isolation levels.
+
+    Values are the SQL strings expected by SQLAlchemy's execution_options(isolation_level=...).
+    """
+
+    READ_COMMITTED = 'READ COMMITTED'
+    REPEATABLE_READ = 'REPEATABLE READ'
+    SERIALIZABLE = 'SERIALIZABLE'
+
+
+class XactMode(enum.Enum):
+    """Transaction mode passed to Catalog.begin_xact().
+
+    - MD_ACCESS: consistent metadata access (ie, multiple reads in the same xact see a consistent state)
+    - QUERY: reads without multi-statement consistency
+    - WRITE_TBL: write; X-locks the target table(s) only.
+    - WRITE_TREE: write; X-locks the target(s) and all mutable descendant views
+    """
+
+    MD_ACCESS = 'md_access'
+    QUERY = 'query'
+    WRITE_TBL = 'write_tbl'
+    WRITE_TREE = 'write_tree'
+
+    @property
+    def is_write(self) -> bool:
+        return self in (XactMode.WRITE_TBL, XactMode.WRITE_TREE)
+
+
 _T = TypeVar('_T')
 
 
@@ -38,7 +70,7 @@ class Runtime:
     _catalog: Catalog | None
     conn: sql.Connection | None
     session: orm.Session | None
-    isolation_level: str | None
+    isolation_level: IsolationLevel | None
     _progress: Progress | None
     _event_loop: asyncio.AbstractEventLoop | None  # event loop for this thread
     _run_coro_executor: concurrent.futures.ThreadPoolExecutor | None
@@ -135,39 +167,47 @@ class Runtime:
         return self._run_coro_executor.submit(run, coro).result()
 
     @contextmanager
-    def begin_xact(self, *, for_write: bool = False) -> Iterator[sql.Connection]:
-        """Start or join a database transaction.
+    def begin_store_xact(self, *, isolation_level: IsolationLevel) -> Iterator[sql.Connection]:
+        """Open a raw database transaction at the given isolation level.
 
-        Prefer Catalog.begin_xact() unless there is a specific reason to call this directly.
+        Low-level: no catalog locking, retry, or pending-ops handling. Catalog operations and data
+        reads/writes go through Catalog.begin_xact() instead; this entry point is for store-table
+        DDL and other work that lives below the catalog protocol.
 
-        Args:
-            for_write: unused (TODO use or remove)
-
-        TODO: repeatable read is not available in Cockroachdb; instead, run queries against a snapshot TVP
-        that avoids tripping over any pending ops
+        Reentrancy: a nested call joins the outer xact at its existing isolation level. The outer
+        and inner isolation levels must match -- silent downgrades or upgrades would either weaken
+        the caller's intended consistency guarantee or surprise the outer with serialization-
+        failure semantics it isn't prepared for. Inner code that needs to operate inside an
+        existing xact at a different isolation level should use get_runtime().conn directly,
+        or restructure to be top-level.
         """
         from pixeltable.env import Env
 
-        if not self.in_xact:
-            assert self.session is None
-            try:
-                self.isolation_level = _XACT_ISOLATION_LEVEL
-                with (
-                    Env.get().engine.connect().execution_options(isolation_level=self.isolation_level) as conn,
-                    orm.Session(conn) as session,
-                    conn.begin(),
-                ):
-                    self.conn = conn
-                    self.session = session
-                    yield conn
-            finally:
-                self.session = None
-                self.conn = None
-                self.isolation_level = None
-        else:
+        env = Env.get()
+        if self.in_xact:
             assert self.session is not None
-            assert self.isolation_level == _XACT_ISOLATION_LEVEL or not for_write
+            assert self.isolation_level == isolation_level, (
+                f'nested begin_store_xact must request the outer isolation: outer={self.isolation_level!r}, '
+                f'inner={isolation_level!r}'
+            )
             yield self.conn
+            return
+
+        assert self.session is None
+        try:
+            self.isolation_level = isolation_level
+            with (
+                env.engine.connect().execution_options(isolation_level=isolation_level.value) as conn,
+                orm.Session(conn) as session,
+                conn.begin(),
+            ):
+                self.conn = conn
+                self.session = session
+                yield conn
+        finally:
+            self.session = None
+            self.conn = None
+            self.isolation_level = None
 
     def start_progress(self, create_fn: Callable[[], Progress]) -> Progress:
         if self._progress is None:

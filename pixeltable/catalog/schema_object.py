@@ -1,17 +1,15 @@
 import abc
-from typing import TYPE_CHECKING
 from uuid import UUID
-
-from pixeltable.runtime import get_runtime
-
-if TYPE_CHECKING:
-    from pixeltable import catalog
 
 
 class SchemaObject(abc.ABC):
     """Base class of all addressable objects within a Db.
 
-    All subclass instances must be thread-safe. To guarantee that, all state is either immutable or thread-safe.
+    Thread-safety contract:
+    - no mutable state
+    - each attribute access (eg, _name) needs to be implemented with guaranteed atomicity by the subclass
+    - multiple consecutive attribute accesses are not guaranteed to be atomic
+    - attributes or other state cannot be cached, which would be problematic with concurrent writes
     """
 
     _id: UUID
@@ -21,33 +19,16 @@ class SchemaObject(abc.ABC):
 
     @abc.abstractmethod
     def _name(self) -> str:
-        """Current name of this object, as recorded in the catalog."""
+        """Name of this object, as recorded in the catalog."""
 
     @abc.abstractmethod
-    def _dir_id(self) -> UUID | None:
-        """Current parent directory id of this object, as recorded in the catalog. None if root."""
-
-    def _parent(self) -> 'catalog.Dir | None':
-        """Returns the parent directory of this schema object."""
-        with get_runtime().catalog.begin_xact(for_write=False):
-            dir_id = self._dir_id()
-            if dir_id is None:
-                return None
-            return get_runtime().catalog.get_dir(dir_id)
-
     def _path(self) -> str:
-        """Returns the path to this schema object."""
-        dir_id = self._dir_id()
-        if dir_id is None:
-            # an instance that's in the process of getting dropped has dir_id unset
-            return '<dropped>'
-        with get_runtime().catalog.begin_xact(for_write=False):
-            path = get_runtime().catalog.get_dir_path(dir_id)
-            return str(path.append(self._name()))
+        """Full path to this object."""
 
     @abc.abstractmethod
     def _display_name(self) -> str:
-        """Return name displayed in error messages."""
+        """Name displayed in error messages."""
 
     def _display_str(self) -> str:
+        """Best-effort display string for this object."""
         return f'{self._display_name()} {self._path()!r}'

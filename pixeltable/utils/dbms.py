@@ -1,10 +1,15 @@
 import abc
 import platform
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sql
 
-# Note: this applies mostly to database bootstrap sessions. Most user-facing operations go through Runtime which
-# overrides this isolation level. Keeping SERIALIZABLE as a safe default.
+if TYPE_CHECKING:
+    from pixeltable.runtime import IsolationLevel, XactMode
+
+# Engine-level default isolation, used at bootstrap and as a fallback. Per-xact isolation is set by
+# Runtime.begin_db_xact() via Dbms.isolation_level(mode). SERIALIZABLE is the safe default for backends
+# that don't support REPEATABLE READ (e.g. older CockroachDB).
 _DEFAULT_ISOLATION_LEVEL = 'SERIALIZABLE'
 
 
@@ -23,6 +28,12 @@ class Dbms(abc.ABC):
         self.transaction_isolation_level = transaction_isolation_level
         self.version_index_type = version_index_type
         self.db_url = db_url
+
+    def isolation_level(self, mode: 'XactMode') -> 'IsolationLevel':
+        """Maps a logical transaction mode to a backend-specific isolation level."""
+        from pixeltable.runtime import IsolationLevel
+
+        return IsolationLevel(self.transaction_isolation_level)
 
     @abc.abstractmethod
     def drop_db_stmt(self, database: str) -> str: ...
@@ -45,7 +56,14 @@ class PostgresqlDbms(Dbms):
     """
 
     def __init__(self, db_url: sql.URL):
-        super().__init__('postgresql', _DEFAULT_ISOLATION_LEVEL, 'brin', db_url)
+        super().__init__('postgresql', 'READ COMMITTED', 'brin', db_url)
+
+    def isolation_level(self, mode: 'XactMode') -> 'IsolationLevel':
+        from pixeltable.runtime import IsolationLevel, XactMode
+
+        # MD_ACCESS wants snapshot isolation so multi-statement metadata reads are consistent.
+        # WRITE_* and QUERY stay at READ COMMITTED.
+        return IsolationLevel.REPEATABLE_READ if mode is XactMode.MD_ACCESS else IsolationLevel.READ_COMMITTED
 
     def drop_db_stmt(self, database: str) -> str:
         return f'DROP DATABASE {database}'

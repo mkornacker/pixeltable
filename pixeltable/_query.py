@@ -35,7 +35,7 @@ from pixeltable.catalog import is_valid_identifier
 from pixeltable.catalog.update_status import UpdateStatus
 from pixeltable.env import Env
 from pixeltable.plan import Planner, SampleClause
-from pixeltable.runtime import get_runtime
+from pixeltable.runtime import XactMode, get_runtime
 from pixeltable.type_system import ColumnType
 from pixeltable.utils.description_helper import DescriptionHelper
 from pixeltable.utils.formatter import Formatter
@@ -781,7 +781,9 @@ class Query:
 
     def _output_row_iterator(self, args: dict[str, Any] | None = None) -> Generator[list, None, None]:
         tbl_ids = self.referenced_tbl_ids()
-        with get_runtime().catalog.begin_xact(for_write=False, read_tvps=self._from_clause.tbls, read_tbl_ids=tbl_ids):
+        with get_runtime().catalog.begin_xact(
+            mode=XactMode.QUERY, tvps=self._from_clause.tbls, tbl_ids=tbl_ids
+        ):
             try:
                 planned_exprs = self._compiled_select_list()
                 for data_row in self._exec(args=args):
@@ -855,7 +857,7 @@ class Query:
         )
         is_grouped = self.group_by_clause is not None or self.grouping_tbl is not None
 
-        with get_runtime().catalog.begin_xact(for_write=False, read_tvps=self._from_clause.tbls):
+        with get_runtime().catalog.begin_xact(mode=XactMode.QUERY, tvps=self._from_clause.tbls):
             plan_root = count_query._ensure_plan().exec_root
             if not isinstance(plan_root, exec.SqlNode):
                 raise excs.RequestError(
@@ -1315,7 +1317,7 @@ class Query:
                 if base is None or base.id == self._first_tbl.tbl_id:
                     raise excs.RequestError(
                         excs.ErrorCode.UNSUPPORTED_OPERATION,
-                        f'group_by(): {grouping_tv.name!r} is not a base table of {self._first_tbl.tbl_name()!r}',
+                        f'group_by(): {grouping_tv.name()!r} is not a base table of {self._first_tbl.tbl_name()!r}',
                     )
                 break
             if not isinstance(item, exprs.Expr):
@@ -1623,7 +1625,7 @@ class Query:
             >>> person.where(t.year == 2014).update({'age': 30})
         """
         self._validate_mutable('update', False)
-        with get_runtime().catalog.begin_xact(for_write=True, write_tvps=[self._first_tbl], lock_mutable_tree=True):
+        with get_runtime().catalog.begin_xact(mode=XactMode.WRITE_TREE, tvps=[self._first_tbl]):
             return self._first_tbl.tbl_version.get().update(value_spec, where=self.where_clause, cascade=cascade)
 
     def recompute_columns(
@@ -1647,7 +1649,7 @@ class Query:
             >>> query = person.where(t.age < 18).recompute_columns(person.height)
         """
         self._validate_mutable('recompute_columns', False)
-        with get_runtime().catalog.begin_xact(for_write=True, write_tvps=[self._first_tbl], lock_mutable_tree=True):
+        with get_runtime().catalog.begin_xact(mode=XactMode.WRITE_TREE, tvps=[self._first_tbl]):
             tbl = get_runtime().catalog.get_table_by_id(self._first_tbl.tbl_id)
 
         return tbl.recompute_columns(*columns, where=self.where_clause, errors_only=errors_only, cascade=cascade)
@@ -1668,7 +1670,7 @@ class Query:
         self._validate_mutable('delete', False)
         if not self._first_tbl.is_insertable():
             raise excs.RequestError(excs.ErrorCode.UNSUPPORTED_OPERATION, 'Cannot use `delete` on a view.')
-        with get_runtime().catalog.begin_xact(for_write=True, write_tvps=[self._first_tbl], lock_mutable_tree=True):
+        with get_runtime().catalog.begin_xact(mode=XactMode.WRITE_TREE, tvps=[self._first_tbl]):
             return self._first_tbl.tbl_version.get().delete(where=self.where_clause)
 
     def _validate_mutable(self, op_name: str, allow_select: bool) -> None:
@@ -1808,7 +1810,7 @@ class Query:
             assert data_file_path.is_file()
             return data_file_path
         else:
-            with get_runtime().catalog.begin_xact(read_tvps=self._from_clause.tbls):
+            with get_runtime().catalog.begin_xact(mode=XactMode.QUERY, tvps=self._from_clause.tbls):
                 return write_coco_dataset(self, dest_path)
 
     def to_pytorch_dataset(self, image_format: str = 'pt') -> 'torch.utils.data.IterableDataset':
@@ -1853,7 +1855,7 @@ class Query:
         if dest_path.exists():  # fast path: use cache
             assert dest_path.is_dir()
         else:
-            with get_runtime().catalog.begin_xact(read_tvps=self._from_clause.tbls):
+            with get_runtime().catalog.begin_xact(mode=XactMode.QUERY, tvps=self._from_clause.tbls):
                 # we need the metadata for PixeltablePytorchDataset
                 export_parquet(self, dest_path, inline_images=True, _write_md=True)
 
