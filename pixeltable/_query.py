@@ -781,9 +781,7 @@ class Query:
 
     def _output_row_iterator(self, args: dict[str, Any] | None = None) -> Generator[list, None, None]:
         tbl_ids = self.referenced_tbl_ids()
-        with get_runtime().catalog.begin_xact(
-            mode=XactMode.QUERY, tvps=self._from_clause.tbls, tbl_ids=tbl_ids
-        ):
+        with get_runtime().catalog.begin_xact(mode=XactMode.QUERY, tvps=self._from_clause.tbls, tbl_ids=tbl_ids):
             try:
                 planned_exprs = self._compiled_select_list()
                 for data_row in self._exec(args=args):

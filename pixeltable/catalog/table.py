@@ -225,7 +225,15 @@ class Table(SchemaObject):
         # we need retry_loop() here, because we end up loading Tables for the views
         @retry_loop(mode=XactMode.MD_ACCESS, tvps=[self._tbl_version_path])
         def op() -> list[str]:
-            return [t._path() for t in self._get_views(recursive=recursive)]
+            paths: list[str] = []
+            for t in self._get_views(recursive=recursive):
+                try:
+                    paths.append(t._path())
+                except excs.NotFoundError as e:
+                    # view was dropped concurrently between enumeration and _path() call; skip it
+                    if not excs.is_table_not_found_error(e):
+                        raise
+            return paths
 
         return op()
 
