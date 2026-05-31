@@ -1496,7 +1496,7 @@ class TableVersion:
         # make sure we don't have a snapshot referencing this version
         # (unclear how to express this with sqlalchemy)
         query = (
-            f"select ts.dir_id, ts.md->'name' "
+            f'select ts.dir_id, ts.name '
             f'from {schema.Table.__tablename__} ts '
             f"cross join lateral jsonb_path_query(md, '$.view_md.base_versions[*]') as tbl_version "
             f"where tbl_version->>0 = '{self.id.hex}' and (tbl_version->>1)::int = {self.version}"

@@ -580,7 +580,7 @@ class Planner:
                 dedent(
                     f"""
                     Data cannot be {op_name} the {tbl.display_str()},
-                    because the iterator defined on {tbl.name!r} is currently invalid:
+                    because the iterator defined on {tbl.name()!r} is currently invalid:
                     {{validation_error}}
                     """
                 )
