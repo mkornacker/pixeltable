@@ -855,7 +855,9 @@ class Query:
         )
         is_grouped = self.group_by_clause is not None or self.grouping_tbl is not None
 
-        with get_runtime().catalog.begin_xact(mode=XactMode.QUERY, tvps=self._from_clause.tbls):
+        with get_runtime().catalog.begin_xact(
+            mode=XactMode.QUERY, tvps=self._from_clause.tbls, tbl_ids=count_query.referenced_tbl_ids()
+        ):
             plan_root = count_query._ensure_plan().exec_root
             if not isinstance(plan_root, exec.SqlNode):
                 raise excs.RequestError(
@@ -1808,7 +1810,9 @@ class Query:
             assert data_file_path.is_file()
             return data_file_path
         else:
-            with get_runtime().catalog.begin_xact(mode=XactMode.QUERY, tvps=self._from_clause.tbls):
+            with get_runtime().catalog.begin_xact(
+                mode=XactMode.QUERY, tvps=self._from_clause.tbls, tbl_ids=self.referenced_tbl_ids()
+            ):
                 return write_coco_dataset(self, dest_path)
 
     def to_pytorch_dataset(self, image_format: str = 'pt') -> 'torch.utils.data.IterableDataset':
@@ -1853,7 +1857,9 @@ class Query:
         if dest_path.exists():  # fast path: use cache
             assert dest_path.is_dir()
         else:
-            with get_runtime().catalog.begin_xact(mode=XactMode.QUERY, tvps=self._from_clause.tbls):
+            with get_runtime().catalog.begin_xact(
+                mode=XactMode.QUERY, tvps=self._from_clause.tbls, tbl_ids=self.referenced_tbl_ids()
+            ):
                 # we need the metadata for PixeltablePytorchDataset
                 export_parquet(self, dest_path, inline_images=True, _write_md=True)
 

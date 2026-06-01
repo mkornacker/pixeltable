@@ -93,7 +93,7 @@ class Table(SchemaObject):
         """
         from pixeltable.catalog import retry_loop
 
-        @retry_loop(mode=XactMode.MD_ACCESS)
+        @retry_loop(mode=XactMode.MD_ACCESS, tvps=[self._tbl_version_path])
         def op() -> 'TableMetadata':
             return self._get_metadata()
 

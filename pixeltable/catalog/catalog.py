@@ -340,6 +340,15 @@ class Catalog:
                 assert tvp.tbl_id in self._x_locked_tbl_ids, f'{tvp.tbl_id} not locked: {self._x_locked_tbl_ids}'
             for tbl_id in write_tbl_ids:
                 assert tbl_id in self._x_locked_tbl_ids, f'{tbl_id} not locked: {self._x_locked_tbl_ids}'
+            cached_tbl_ids = {key.tbl_id for key in self._tbl_versions}
+            for tvp in read_tvps:
+                assert tvp.tbl_id in cached_tbl_ids or tvp.tbl_id in self._x_locked_tbl_ids, (
+                    f'{tvp.tbl_id} not declared by outer xact'
+                )
+            for tbl_id in read_tbl_ids:
+                assert tbl_id in cached_tbl_ids or tbl_id in self._x_locked_tbl_ids, (
+                    f'{tbl_id} not declared by outer xact'
+                )
             yield get_runtime().conn
             return
 
@@ -2195,7 +2204,7 @@ class Catalog:
     def read_tbl_path(self, tbl_id: UUID) -> list[str]:
         """Path components for the given table: dir names from root, followed by the table name.
 
-        Atomic: one SQL statement.
+        Atomic: single SELECT statement
         """
         assert get_runtime().in_xact
         # recursive CTE walking from the table's dir up through parent_id pointers
@@ -2224,7 +2233,6 @@ class Catalog:
         return [*dir_names, tbl_name]
 
     def read_tbl_name(self, tbl_id: UUID) -> str:
-        """Current name of the table. Single SELECT, always fresh."""
         assert get_runtime().in_xact
         row = get_runtime().conn.execute(sql.select(schema.Table.name).where(schema.Table.id == tbl_id)).one_or_none()
         if row is None:
