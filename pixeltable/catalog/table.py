@@ -294,7 +294,8 @@ class Table(SchemaObject):
 
     def distinct(self) -> 'pxt.Query':
         """Remove duplicate rows from table."""
-        return self.select().distinct()
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tvps=[self._tbl_version_path]):
+            return self.select().distinct()
 
     def limit(self, n: int, offset: int | None = None) -> 'pxt.Query':
         """Select a limited number of rows from the Table, optionally skipping rows for pagination.
@@ -315,7 +316,8 @@ class Table(SchemaObject):
 
             >>> t.limit(10, offset=20).collect()
         """
-        return self.select().limit(n, offset=offset)
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tvps=[self._tbl_version_path]):
+            return self.select().limit(n, offset=offset)
 
     def sample(
         self,
@@ -329,9 +331,10 @@ class Table(SchemaObject):
 
         See [`Query.sample`][pixeltable.Query.sample] for more details.
         """
-        return self.select().sample(
-            n=n, n_per_stratum=n_per_stratum, fraction=fraction, seed=seed, stratify_by=stratify_by
-        )
+        with get_runtime().catalog.begin_xact(mode=XactMode.MD_ACCESS, tvps=[self._tbl_version_path]):
+            return self.select().sample(
+                n=n, n_per_stratum=n_per_stratum, fraction=fraction, seed=seed, stratify_by=stratify_by
+            )
 
     def collect(self) -> 'pxt._query.ResultSet':
         """Return rows from this table."""
