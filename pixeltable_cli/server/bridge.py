@@ -13,8 +13,11 @@ import io
 import json
 import logging
 import re
+import subprocess
+import textwrap
 import urllib.parse
 import urllib.request
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import pixeltable as pxt
@@ -26,6 +29,54 @@ _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from pixeltable import exprs
+
+
+_EXPR_CACHE: dict[tuple[uuid.UUID, int, str], str] = {}
+_EXPR_WRAPPER_PREFIX = '_pxt_expr = '
+
+
+def _format_expr(expr: str) -> str:
+    """Best-effort ruff format. Returns expr unchanged on any failure."""
+    try:
+        # get_metadata() may emit raw newlines inside string literals; escape them so the
+        # source parses as a single-line expression.
+        safe_expr = expr.replace('\n', '\\n').replace('\r', '\\r')
+        wrapped = f'{_EXPR_WRAPPER_PREFIX}({safe_expr})\n'
+        result = subprocess.run(
+            ['ruff', 'format', '--stdin-filename', '_.py', '--line-length', '60', '-'],
+            input=wrapped,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2.0,
+        )
+        if result.returncode != 0:
+            return expr
+        formatted = result.stdout.rstrip('\n')
+        if not formatted.startswith(_EXPR_WRAPPER_PREFIX):
+            return expr
+        body = formatted[len(_EXPR_WRAPPER_PREFIX) :]
+        if body.startswith('(') and body.endswith(')'):
+            return textwrap.dedent(body[1:-1]).strip('\n')
+        return body
+    except Exception:
+        return expr
+
+
+def format_metadata_computed_with(md: dict[str, Any]) -> None:
+    """In place: replace each column's computed_with with a ruff-formatted version (cached)."""
+    table_id = md.get('id')
+    version = md.get('version')
+    for col_name, info in md.get('columns', {}).items():
+        expr = info.get('computed_with')
+        if expr is None:
+            continue
+        cache_key = (table_id, version, col_name)
+        cached = _EXPR_CACHE.get(cache_key)
+        if cached is None:
+            cached = _format_expr(expr)
+            _EXPR_CACHE[cache_key] = cached
+        info['computed_with'] = cached
 
 
 def _build_select(
@@ -60,6 +111,7 @@ def _build_select(
                 'is_media': is_media,
                 'is_computed': is_computed,
                 'is_stored': is_stored,
+                'is_iterator_col': info['is_iterator_col'],
                 'is_sorted': col_name in sorted_cols,
             }
         )
@@ -214,57 +266,62 @@ def export_table_csv(table_path: str, limit: int = 100_000) -> bytes:
     return buf.getvalue().encode('utf-8')
 
 
-def search(query: str, limit: int = 50) -> dict[str, Any]:
+def search(query: str, additional_db_uris: list[str] | None = None, limit: int = 50) -> dict[str, Any]:
     """
-    Search across directories, tables, and columns.
+    Search across directories, tables, and columns in the local catalog and any additional catalogs.
+
+    The local (in-process) catalog is always searched; additional_db_uris holds hosted db uris to
+    search as well. Result paths are full and resolvable in their catalog.
     """
     query_lower = query.lower()
 
     results: dict[str, Any] = {'query': query, 'directories': [], 'tables': [], 'columns': []}
 
-    # Search directories
-    all_dirs = pxt.list_dirs('', recursive=True)
-    for dir_path in all_dirs:
-        if query_lower in dir_path.lower():
-            results['directories'].append({'path': dir_path, 'name': dir_path.split('/')[-1]})
+    # The local catalog is the empty root; each additional catalog is searched at its hosted-uri root.
+    roots = ['', *(additional_db_uris or [])]
+
+    for root in roots:
+        # Search directories
+        for dir_path in pxt.list_dirs(root, recursive=True):
             if len(results['directories']) >= limit:
                 break
+            if query_lower in dir_path.lower():
+                results['directories'].append({'path': dir_path, 'name': dir_path.split('/')[-1]})
 
-    # Search tables and their columns (single get_table call per table)
-    all_tables = pxt.list_tables('', recursive=True)
-    for tbl_path in all_tables:
-        tbl_name = tbl_path.split('/')[-1]
-        table_matches = query_lower in tbl_path.lower()
+        # Search tables and their columns (single get_table call per table)
+        for tbl_path in pxt.list_tables(root, recursive=True):
+            tbl_name = tbl_path.split('/')[-1]
+            table_matches = query_lower in tbl_path.lower()
 
-        # Only fetch table metadata once, and only when needed
-        tbl_md: TableMetadata | None = None
-        if table_matches or len(results['columns']) < limit:
-            try:
-                tbl = pxt.get_table(tbl_path)
-                tbl_md = tbl.get_metadata()
-            except Exception:
-                # If we can't get metadata, record table match with defaults
-                if table_matches and len(results['tables']) < limit:
-                    results['tables'].append({'path': tbl_path, 'name': tbl_name, 'kind': 'table'})
-                continue
+            # Only fetch table metadata once, and only when needed
+            tbl_md: TableMetadata | None = None
+            if table_matches or len(results['columns']) < limit:
+                try:
+                    tbl = pxt.get_table(tbl_path)
+                    tbl_md = tbl.get_metadata()
+                except Exception:
+                    # If we can't get metadata, record table match with defaults
+                    if table_matches and len(results['tables']) < limit:
+                        results['tables'].append({'path': tbl_path, 'name': tbl_name, 'kind': 'table'})
+                    continue
 
-        if table_matches and len(results['tables']) < limit and tbl_md:
-            results['tables'].append({'path': tbl_path, 'name': tbl_name, 'kind': tbl_md['kind']})
+            if table_matches and len(results['tables']) < limit and tbl_md:
+                results['tables'].append({'path': tbl_path, 'name': tbl_name, 'kind': tbl_md['kind']})
 
-        # Search columns within this table (reuse tbl_md)
-        if tbl_md and len(results['columns']) < limit:
-            for col_name, col_info in tbl_md['columns'].items():
-                if query_lower in col_name.lower():
-                    results['columns'].append(
-                        {
-                            'name': col_name,
-                            'table': tbl_path,
-                            'type': col_info['type_'],
-                            'is_computed': col_info['is_computed'],
-                        }
-                    )
+            # Search columns within this table (reuse tbl_md)
+            if tbl_md:
+                for col_name, col_info in tbl_md['columns'].items():
                     if len(results['columns']) >= limit:
                         break
+                    if query_lower in col_name.lower():
+                        results['columns'].append(
+                            {
+                                'name': col_name,
+                                'table': tbl_path,
+                                'type': col_info['type_'],
+                                'is_computed': col_info['is_computed'],
+                            }
+                        )
 
     return results
 
@@ -373,7 +430,13 @@ def get_pipeline(tbl_path: str | None = None) -> dict[str, Any]:
                     computed_cols.append(col_name)
                 defined_in = info['defined_in']
 
-                value_expr = value_expr[:200] if value_expr is not None else None
+                if value_expr is not None:
+                    cache_key = (md['id'], md['version'], col_name)
+                    cached = _EXPR_CACHE.get(cache_key)
+                    if cached is None:
+                        cached = _format_expr(value_expr)
+                        _EXPR_CACHE[cache_key] = cached
+                    value_expr = cached
                 func_type: str | None
                 if not is_computed and not is_iter_col:
                     func_type = None
