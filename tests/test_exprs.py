@@ -811,7 +811,9 @@ class TestExprs:
 
         # test it as a computed column
         validate_update_status(t.add_computed_column(out1=pxtf.map(t.c6.f5, lambda x: x + 1)), 100)
-        validate_update_status(t.add_computed_column(out2=pxtf.map(t.c7['*'].f5, lambda x: [x[3], x[2], x[1], x[0]])), 100)
+        validate_update_status(
+            t.add_computed_column(out2=pxtf.map(t.c7['*'].f5, lambda x: [x[3], x[2], x[1], x[0]])), 100
+        )
         validate_update_status(t.add_computed_column(out3=pxtf.map(t.c6.f5, lambda x: x * t.c6.f5[1])), 100)
         validate_update_status(t.add_computed_column(out4=pxtf.map(t.c6.f5, lambda x: x + 1)[0]), 100)
         res_col = reload_tester.run_query(t.select(t.out1, t.out2, t.out3, t.out4).order_by(t.c2))
