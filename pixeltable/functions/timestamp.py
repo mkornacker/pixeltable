@@ -8,12 +8,13 @@ Usage example:
 >>> t.select(t.timestamp_col.year, t.timestamp_col.weekday()).collect()
 """
 
-from datetime import datetime
+from datetime import date as pydate, datetime
 
 import sqlalchemy as sql
 
 import pixeltable as pxt
 from pixeltable.env import Env
+from pixeltable.functions.date import IsoCalendar
 from pixeltable.utils.code import local_public_names
 
 _SQL_ZERO = sql.literal(0)
@@ -129,6 +130,21 @@ def _(self: sql.ColumnElement) -> sql.ColumnElement:
 
 
 @pxt.udf(is_method=True)
+def date(self: datetime) -> pydate:
+    """
+    Return the date part of the timestamp.
+
+    Equivalent to [`datetime.date()`](https://docs.python.org/3/library/datetime.html#datetime.datetime.date).
+    """
+    return self.date()
+
+
+@date.to_sql
+def _(self: sql.ColumnElement) -> sql.ColumnElement:
+    return sql.cast(self, sql.Date)
+
+
+@pxt.udf(is_method=True)
 def astimezone(self: datetime, tz: str) -> datetime:
     """
     Convert the datetime to the given time zone.
@@ -174,7 +190,7 @@ def _(self: sql.ColumnElement) -> sql.ColumnElement:
 
 
 @pxt.udf(is_method=True)
-def isocalendar(self: datetime) -> dict:
+def isocalendar(self: datetime) -> IsoCalendar:
     """
     Return a dictionary with three entries: `'year'`, `'week'`, and `'weekday'`.
 

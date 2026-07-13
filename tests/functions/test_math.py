@@ -85,3 +85,44 @@ class TestMath:
                 assert mref.fn.name == pxt_fn.name, pxt_fn
             else:
                 raise AssertionError()
+
+    def test_log_fns(self, uses_db: None) -> None:
+        # tested separately from test_methods: these are only defined for positive (finite) inputs
+        t = pxt.create_table('test_tbl', {'x': pxt.Float})
+        values = [0.25, 1.0, 2.5, 100.0]
+        t.insert({'x': x} for x in values)
+
+        test_params: list[tuple[pxt.Function, Callable]] = [
+            (pxtf.math.sqrt, math.sqrt),
+            (pxtf.math.exp, math.exp),
+            (pxtf.math.ln, math.log),
+            (pxtf.math.log10, math.log10),
+        ]
+        for pxt_fn, py_fn in test_params:
+            expected = [py_fn(x) for x in values]
+            actual = t.select(out=pxt_fn(t.x)).order_by(t.x).collect()['out']
+            assert np.allclose(actual, expected), pxt_fn
+            # Run the same query, forcing the calculations to be done in Python (not SQL)
+            # by interposing a non-SQLizable identity function
+            actual_py = t.select(out=pxt_fn(t.x.apply(lambda x: x, col_type=pxt.Float))).order_by(t.x).collect()['out']
+            assert np.allclose(actual_py, expected), pxt_fn
+            # method syntax
+            mref = getattr(t.x, pxt_fn.name)
+            assert isinstance(mref, exprs.MethodRef)
+            assert mref.method_name == pxt_fn.name, pxt_fn
+
+    def test_pow(self, uses_db: None) -> None:
+        t = pxt.create_table('test_tbl', {'i': pxt.Int, 'f': pxt.Float})
+        t.insert([{'i': 2, 'f': 1.5}, {'i': 5, 'f': 0.25}])
+
+        # pow takes float parameters; int arguments are accepted in both call forms, and method syntax on an
+        # int column resolves via the Int-to-Float method lookup
+        res = (
+            t.select(ff=pxtf.math.pow(t.f, 2), fi=t.f.pow(t.i), ii=t.i.pow(2), int_sqrt=t.i.sqrt())
+            .order_by(t.i)
+            .collect()
+        )
+        assert np.allclose(res['ff'], [1.5**2, 0.25**2])
+        assert np.allclose(res['fi'], [1.5**2, 0.25**5])
+        assert np.allclose(res['ii'], [4.0, 25.0])
+        assert np.allclose(res['int_sqrt'], [math.sqrt(2), math.sqrt(5)])
