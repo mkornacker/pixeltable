@@ -24,19 +24,15 @@ class Videos(TableModel, name='videos'):
     """Source videos; insert local files or s3/http URLs."""
 
     video: pxt.Required[pxt.Video]
-    metadata = pxtf.video.get_metadata(video)
+    metadata = pxtf.video.get_metadata(video)  # noqa: F821
 
 
-class Frames(
-    TableModel,
-    name='frames',
-    base=Videos,
-    iterator=pxtf.video.frame_iterator(Videos.video, fps=1.0),
-):
+class Frames(TableModel, name='frames', base=Videos, iterator=pxtf.video.frame_iterator(Videos.video, fps=1.0)):
     """One row per extracted frame; the frame image is unstored and extracted on demand."""
 
     # pseudo-labels: YOLOX detections as {'bboxes': [[x1, y1, x2, y2], ...], 'scores': [...], 'labels': [...]}
     detections = pxtf.yolox.yolox(frame, model_id='yolox_s', threshold=0.5)  # noqa: F821
+    num_detections = detections.bboxes.len()
     # unstored visualization: rendered on read (e.g. in the dashboard), never persisted
     overlay = Column(
         value=pxtf.vision.bboxes_draw(frame, detections.bboxes, labels=detections.labels),  # noqa: F821
@@ -44,12 +40,7 @@ class Frames(
     )
 
 
-class TrainingFrames(
-    TableModel,
-    name='training_frames',
-    # at least one detection (bboxes[0] is None for an empty list)
-    base=Frames.where(Frames.detections.bboxes[0] != None),  # noqa: E711
-):
+class TrainingFrames(TableModel, name='training_frames', base=Frames.where(Frames.num_detections > 0)):
     """Training samples: model-input-sized images with boxes rescaled to match."""
 
     image = Frames.frame.resize([IMG_SIZE, IMG_SIZE])
