@@ -343,7 +343,7 @@ class TestTable:
                     },
                     'is_view': False,
                     'is_snapshot': False,
-                    'is_versioned': True,
+                    'is_data_versioned': True,
                     'kind': 'table',
                     'view_filter': None,
                     'view_sample': None,
@@ -399,7 +399,7 @@ class TestTable:
                     },
                     'is_view': True,
                     'is_snapshot': False,
-                    'is_versioned': True,
+                    'is_data_versioned': True,
                     'kind': 'view',
                     'view_filter': None,
                     'view_sample': None,
@@ -441,7 +441,7 @@ class TestTable:
                     'indices': {},
                     'is_view': True,
                     'is_snapshot': True,
-                    'is_versioned': True,
+                    'is_data_versioned': True,
                     'kind': 'snapshot',
                     'view_filter': None,
                     'view_sample': None,
@@ -500,7 +500,7 @@ class TestTable:
                     'indices': {},
                     'is_view': True,
                     'is_snapshot': True,
-                    'is_versioned': True,
+                    'is_data_versioned': True,
                     'kind': 'snapshot',
                     'view_filter': None,
                     'view_sample': None,
@@ -651,7 +651,7 @@ class TestTable:
                 },
                 'is_view': False,
                 'is_snapshot': False,
-                'is_versioned': True,
+                'is_data_versioned': True,
                 'kind': 'table',
                 'view_filter': None,
                 'view_sample': None,
@@ -803,7 +803,7 @@ class TestTable:
                 },
                 'is_view': True,
                 'is_snapshot': False,
-                'is_versioned': True,
+                'is_data_versioned': True,
                 'kind': 'view',
                 'view_filter': None,
                 'view_sample': None,
@@ -834,7 +834,7 @@ class TestTable:
                 'kind': 'view',
                 'is_view': True,
                 'is_snapshot': False,
-                'is_versioned': True,
+                'is_data_versioned': True,
                 'base': tbl_path,
                 'view_filter': None,
                 'view_sample': None,
@@ -2401,7 +2401,7 @@ class TestTable:
 
         # drop() clears stored images and the cache
         tbl.insert(payload=1, video=get_video_files()[0])
-        with pxt_raises(pxt.ErrorCode.CONSTRAINT_VIOLATION, match='has dependents'):
+        with pxt_raises(pxt.ErrorCode.CONSTRAINT_VIOLATION, match="the following depend on it: 'test_view'"):
             pxt.drop_table(p('test_tbl'))
         pxt.drop_table(p('test_view'))
         pxt.drop_table(p('test_tbl'))
@@ -3500,7 +3500,7 @@ class TestTable:
         with pxt_raises(pxt.ErrorCode.COLUMN_ALREADY_EXISTS) as exc_info:
             t.add_column(c1=pxt.Int, if_exists='replace')
         error_msg = str(exc_info.value).lower()
-        assert 'already exists' in error_msg and 'has dependents' in error_msg
+        assert 'already exists' in error_msg and 'the following columns depend on it: non_existing_col3' in error_msg
         assert 'c1' in t.columns()
         assert t.select(t.c1).order_by(t.c1).collect()[0] != {'c1': 10}
         assert (

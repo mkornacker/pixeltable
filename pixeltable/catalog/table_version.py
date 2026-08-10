@@ -193,7 +193,10 @@ class TableVersion:
         self.num_iterator_cols = 0
         if self.view_md is not None and self.view_md.iterator_call is not None:
             self.iterator_call = GeneratingFunctionCall.from_dict(self.view_md.iterator_call)
-            self.num_iterator_cols = len(self.iterator_call.outputs)
+            # outputs is None: this catches views created before iterator outputs were persisted;
+            # for those, num_iterator_cols stays 0, which keeps the view loadable and its stored data readable
+            if self.iterator_call.outputs is not None:
+                self.num_iterator_cols = len(self.iterator_call.outputs)
 
         self.mutable_views = frozenset(mutable_views)
         assert self.is_mutable or len(self.mutable_views) == 0
@@ -217,9 +220,12 @@ class TableVersion:
 
     def __repr__(self) -> str:
         version_info = ''
-        if self.is_versioned:
+        if self.is_data_versioned:
             version_info = f', effective_version={self.effective_version}, version={self.version}'
-        return f'TableVersion(id={self.id!r}, name={self.name!r}, is_versioned={self.is_versioned}{version_info})'
+        return (
+            f'TableVersion(id={self.id!r}, name={self.name!r}, '
+            f'is_data_versioned={self.is_data_versioned}{version_info})'
+        )
 
     @property
     def handle(self) -> 'TableVersionHandle':
@@ -238,7 +244,7 @@ class TableVersion:
         media_validation: MediaValidation,
         create_default_idxs: bool,
         view_md: schema.ViewMd | None,
-        is_versioned: bool,
+        is_data_versioned: bool,
         additional_idxs: list[IndexSpec],
     ) -> TableVersionMd:
         from .table_version_handle import TableVersionHandle
@@ -348,7 +354,7 @@ class TableVersion:
             index_md=index_md,
             view_md=view_md,
             additional_md={},
-            is_versioned=is_versioned,
+            is_data_versioned=is_data_versioned,
         )
 
         table_version_md = schema.VersionMd(
@@ -383,7 +389,7 @@ class TableVersion:
     def drop_ops(self) -> tuple[list[TableOp], bool]:
         """Returns a tuple of drop table ops, and a boolean that indicates whether a new table and schema
         versions were created."""
-        new_version = self.is_mutable and self.is_versioned
+        new_version = self.is_mutable and self.is_data_versioned
         if new_version:
             self.bump_version(bump_schema_version=True)
         mutable_base_tbl_id: str | None = None
@@ -569,7 +575,7 @@ class TableVersion:
         return f'idx_{self.id.hex}_{idx_id}'
 
     def add_index(self, col: Column, idx_name: str | None, idx: index.IndexBase) -> UpdateStatus:
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         # we're creating a new schema version
         self.bump_version(bump_schema_version=True)
         status = self._add_index(col, idx_name, idx)
@@ -656,7 +662,7 @@ class TableVersion:
     def drop_index(self, idx_id: int) -> None:
         assert self.is_mutable
         assert idx_id in self._tbl_md.index_md
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
 
         idx_name = self._tbl_md.index_md[idx_id].name
         # we're creating a new schema version
@@ -682,7 +688,7 @@ class TableVersion:
 
         # remove this index entry from the active indexes (in memory)
         # and the index metadata (in persistent table metadata)
-        # TODO: this is wrong, it breaks revert()
+        # TODO(PXT-1254): this is wrong, it breaks revert()
         del self.idxs[idx_id]
         del self.idxs_by_name[idx_md.name]
         if idx_info.col.qid in self.idxs_by_col:
@@ -693,7 +699,7 @@ class TableVersion:
 
     def add_columns_ops(self, cols: Iterable[Column]) -> tuple[TableVersionMd, list[TableOp]]:
         """Adds columns to the table."""
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         assert self.is_mutable
         assert all(is_valid_identifier(col.name) for col in cols if col.name is not None)
         assert all(col.stored is not None for col in cols)
@@ -768,7 +774,7 @@ class TableVersion:
 
     def add_columns(self, cols: list[Column], print_stats: bool, on_error: Literal['abort', 'ignore']) -> UpdateStatus:
         """Adds columns to the table."""
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         assert self.is_mutable
 
         # we're creating a new schema version
@@ -875,7 +881,7 @@ class TableVersion:
         """Drop a column from the table."""
 
         assert self.is_mutable
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
 
         # we're creating a new schema version
         self.bump_version(bump_schema_version=True)
@@ -954,7 +960,7 @@ class TableVersion:
         - Drops precede adds, and index drops precede column drops, so an index that is both explicitly dropped and
           attached to a dropped column is processed only once.
         """
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         assert self.is_mutable
 
         if self.schema_version != expected_schema_version:
@@ -1048,7 +1054,7 @@ class TableVersion:
 
     def rename_column(self, old_name: str, new_name: str) -> None:
         """Rename a column."""
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         if not self.is_mutable:
             raise excs.RequestError(
                 excs.ErrorCode.UNSUPPORTED_OPERATION, f'Cannot rename column for immutable table {self.name!r}'
@@ -1077,7 +1083,7 @@ class TableVersion:
 
     def alter_column(self, col: Column, type_: ts.ColumnType) -> None:
         """Alter the type of a column. Currently only supports widening a value column to nullable."""
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         assert self.is_mutable
         assert not col.is_computed
         assert not col.is_pk
@@ -1109,7 +1115,7 @@ class TableVersion:
         self._create_schema_version()
 
     def _create_schema_version(self) -> None:
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         # we're creating a new schema version
         self.bump_version(bump_schema_version=True)
         self._write_md(new_version=True, new_schema_version=True)
@@ -1138,9 +1144,9 @@ class TableVersion:
                 plan = Planner.create_insert_plan(self, source, ignore_errors=not fail_on_exception)
 
         rowid_gen: Iterator[int] | None = None
-        # For versioned tables, generate rowids from the table's sequence.
-        # For unversioned tables, row ids are generated by StoreBase itself.
-        if self.is_versioned:
+        # For data-versioned tables, generate rowids from the table's sequence.
+        # For operational tables, row ids are generated by StoreBase itself.
+        if self.is_data_versioned:
 
             def rowids() -> Iterator[int]:
                 while True:
@@ -1172,7 +1178,7 @@ class TableVersion:
         return_rows: bool = False,
     ) -> UpdateStatus:
         """Insert rows produced by exec_plan and propagate to views"""
-        if self.is_versioned:
+        if self.is_data_versioned:
             # we're creating a new version
             self.bump_version(timestamp, bump_schema_version=False)
         exec_plan.ctx.title = self.display_str()
@@ -1200,7 +1206,7 @@ class TableVersion:
             result += status.to_cascade()
 
         # Use the net status after all propagations
-        if self.is_versioned:
+        if self.is_data_versioned:
             self.set_version_update_status(result)
             self._write_md(new_version=True, new_schema_version=False)
             _logger.info(f'TableVersion {self.name}: new version {self.version}')
@@ -1227,7 +1233,7 @@ class TableVersion:
         from pixeltable.plan import Planner
 
         assert self.is_mutable
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
 
         update_spec = self._validate_update_spec(value_spec, allow_pk=False, allow_exprs=True, allow_media=True)
         if where is not None:
@@ -1277,7 +1283,7 @@ class TableVersion:
 
         # if we do lookups of rowids, we must have one for each row in the batch
         assert len(rowids) == 0 or len(rowids) == len(batch)
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
 
         plan, row_update_node, delete_where_clause, updated_cols, recomputed_cols = Planner.create_batch_update_plan(
             self.path, batch, rowids, cascade=cascade
@@ -1388,7 +1394,7 @@ class TableVersion:
         from pixeltable.plan import Planner
 
         assert self.is_mutable
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         assert all(name in self.cols_by_name for name in col_names)
         assert len(col_names) > 0
         assert len(col_names) == 1 or not errors_only
@@ -1441,7 +1447,7 @@ class TableVersion:
         """
         from pixeltable.plan import Planner
 
-        assert self.is_versioned, 'TODO: implement for unversioned tables [PXT-1101]'
+        assert self.is_data_versioned, 'TODO: implement for operational tables [PXT-1101]'
         get_runtime().catalog.mark_modified_tv(self.handle)
         result = UpdateStatus()
         create_new_table_version = len(plans) > 0
@@ -1575,7 +1581,7 @@ class TableVersion:
         get_runtime().catalog.mark_modified_tv(self.handle)
 
         sql_where_clause = where.sql_expr(exprs.SqlElementCache()) if where is not None else None
-        if self.is_versioned:
+        if self.is_data_versioned:
             del_rows = self.store_tbl.soft_delete_rows(
                 self.version + 1, base_versions=base_versions, match_on_vmin=False, where_clause=sql_where_clause
             )
@@ -1583,7 +1589,7 @@ class TableVersion:
             del_rows = self.store_tbl.delete_rows(where_clause=sql_where_clause)
         row_counts = RowCountStats(del_rows=del_rows)  # delete
         result = UpdateStatus(row_count_stats=row_counts)
-        if del_rows > 0 and self.is_versioned:
+        if del_rows > 0 and self.is_data_versioned:
             # we're creating a new version
             self.bump_version(timestamp, bump_schema_version=False)
         # a table that deleted nothing has nothing beneath it to delete, and never bumped: passing on its
@@ -1595,7 +1601,7 @@ class TableVersion:
                 )
                 result += status.to_cascade()
 
-        if del_rows > 0 and self.is_versioned:
+        if del_rows > 0 and self.is_data_versioned:
             self.set_version_update_status(result)
             self._write_md(new_version=True, new_schema_version=False)
         return result
@@ -1603,7 +1609,7 @@ class TableVersion:
     def revert(self) -> None:
         """Reverts the table to the previous version."""
         assert self.is_mutable
-        assert self.is_versioned
+        assert self.is_data_versioned
         if self.version == 0:
             raise excs.RequestError(excs.ErrorCode.UNSUPPORTED_OPERATION, 'Cannot revert version 0')
         self._revert()
@@ -1720,7 +1726,7 @@ class TableVersion:
 
     @property
     def effective_version(self) -> int | None:
-        if not self.is_versioned:
+        if not self.is_data_versioned:
             assert self.key.effective_version is None
         return self.key.effective_version
 
@@ -1763,7 +1769,7 @@ class TableVersion:
 
     @property
     def version(self) -> int | None:
-        if not self.is_versioned:
+        if not self.is_data_versioned:
             return None
         return self._version_md.version
 
@@ -1776,8 +1782,8 @@ class TableVersion:
         return self._schema_version_md.schema_version
 
     @property
-    def is_versioned(self) -> bool:
-        return self._tbl_md.is_versioned
+    def is_data_versioned(self) -> bool:
+        return self._tbl_md.is_data_versioned
 
     def bump_version(self, timestamp: float | None = None, *, bump_schema_version: bool) -> None:
         """
@@ -1790,7 +1796,7 @@ class TableVersion:
             bump_schema_version: if True, also adjusts the schema version (setting it equal to the new version)
                 and associated metadata.
         """
-        assert self.is_versioned
+        assert self.is_data_versioned
         assert self.effective_version is None
 
         if timestamp is None:
@@ -1820,7 +1826,7 @@ class TableVersion:
 
     def set_version_update_status(self, status: UpdateStatus) -> None:
         """Record status as the UpdateStatus of the change that created the current version."""
-        assert self.is_versioned
+        assert self.is_data_versioned
         assert self.effective_version is None
         # we need to strip out UpdateStatus.rows, if set
         if status.rows is not None:
@@ -1847,12 +1853,12 @@ class TableVersion:
 
     @property
     def next_row_id(self) -> int:
-        assert self.is_versioned
+        assert self.is_data_versioned
         return self._tbl_md.next_row_id
 
     @next_row_id.setter
     def next_row_id(self, row_id: int) -> None:
-        assert self.is_versioned
+        assert self.is_data_versioned
         assert self.effective_version is None
         self._tbl_md.next_row_id = row_id
 

@@ -59,7 +59,7 @@ class CatalogProxy(CatalogBase):
         custom_metadata: Any,
         media_validation: MediaValidation,
         create_default_idxs: bool,
-        is_versioned: bool,
+        is_data_versioned: bool,
     ) -> tuple[Table, bool]:
         args = {
             'path': path,
@@ -70,7 +70,7 @@ class CatalogProxy(CatalogBase):
             'custom_metadata': custom_metadata,
             'media_validation': media_validation,
             'create_default_idxs': create_default_idxs,
-            'is_versioned': is_versioned,
+            'is_data_versioned': is_data_versioned,
         }
         md, was_created = self.client.send_request('CatalogBase', 'create_table', args)
         # effective_version=None: this is a live table
@@ -138,7 +138,7 @@ class CatalogProxy(CatalogBase):
         md, was_created = self.client.send_request('CatalogBase', 'create_from_model', args)
         return self._make_table(md, is_anon_snapshot=False), was_created
 
-    def update_from_model(self, updates: list[model.TableSchemaChange]) -> None:
+    def update_from_model(self, updates: list[model.TableSchemaChangeSet]) -> None:
         self.client.send_request('CatalogBase', 'update_from_model', {'updates': updates})
 
     def get_table(self, path: Path, if_not_exists: IfNotExistsParam) -> Table | None:

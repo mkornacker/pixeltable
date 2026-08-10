@@ -37,7 +37,7 @@ class CatalogBase(abc.ABC):
         custom_metadata: Any,
         media_validation: MediaValidation,
         create_default_idxs: bool,
-        is_versioned: bool,
+        is_data_versioned: bool,
     ) -> tuple[Table, bool]: ...
 
     @abc.abstractmethod
@@ -74,7 +74,7 @@ class CatalogBase(abc.ABC):
     ) -> tuple[Table, bool]: ...
 
     @abc.abstractmethod
-    def update_from_model(self, updates: list[model.TableSchemaChange]) -> None: ...
+    def update_from_model(self, updates: list[model.TableSchemaChangeSet]) -> None: ...
 
     @abc.abstractmethod
     def get_table(self, path: Path, if_not_exists: IfNotExistsParam) -> Table | None: ...
