@@ -1360,7 +1360,12 @@ class TestFastAPI:
             served.server.handle_exit(signal.SIGTERM, None)
             assert wait_until(lambda: served.server.should_exit, 5.0)
 
-    def test_openapi(self, db_root: DatabaseRoot) -> None:
+    @pytest.mark.parametrize(
+        ('router_name', 'job_path'),
+        [(None, '/_pxt/jobs/{job_id}'), ('ingest', '/_pxt/jobs/ingest/{job_id}')],
+        ids=['unnamed', 'named'],
+    )
+    def test_openapi(self, db_root: DatabaseRoot, router_name: str | None, job_path: str) -> None:
         """Verify the generated OpenAPI schema reflects column comments, column types, and route shapes."""
         p = db_root.make_catalog_path
         skip_test_if_not_installed('fastapi')
@@ -1381,7 +1386,7 @@ class TestFastAPI:
         # description is absent (i.e. not fabricated).
         t.add_computed_column(rotated=t.image.rotate(90))
 
-        router = FastAPIRouter()
+        router = FastAPIRouter(name=router_name)
         router.add_insert_route(t, path='/json')
         router.add_insert_route(t, path='/upload', uploadfile_inputs=['image'])
         router.add_insert_route(t, path='/file', outputs=['rotated'], return_fileresponse=True)
@@ -1396,7 +1401,7 @@ class TestFastAPI:
         for route_path in ('/json', '/upload', '/file', '/bg'):
             assert route_path in paths, f'missing {route_path} from openapi paths: {list(paths)}'
         # of the routes Pixeltable serves itself, the document lists only the one that polls a background job
-        assert [path for path in paths if path.startswith('/_pxt/')] == ['/_pxt/jobs/{job_id}'], sorted(paths)
+        assert [path for path in paths if path.startswith('/_pxt/')] == [job_path], sorted(paths)
 
         def deref(schema_or_ref: dict[str, Any]) -> dict[str, Any]:
             """
@@ -1457,7 +1462,7 @@ class TestFastAPI:
         assert 'BackgroundJobResponse' in schemas
         bg_model = schemas['BackgroundJobResponse']
         assert set(bg_model['properties'].keys()) == {'id', 'job_url'}
-        job_resp = paths['/_pxt/jobs/{job_id}']['get']['responses']['200']['content']['application/json']['schema']
+        job_resp = paths[job_path]['get']['responses']['200']['content']['application/json']['schema']
         assert job_resp == {'$ref': '#/components/schemas/JobStatusResponse'}, job_resp
 
     def test_add_query_route_scalars(self, db_root: DatabaseRoot) -> None:
