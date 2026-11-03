@@ -90,8 +90,10 @@ safely executed:
 - A pure snapshot has no store table. Its path includes the stored base versions to read; its own metadata is
   protected by its parent directory lock when created or deleted.
 - Every operation except finalization also locks its queried paths for read: the paths of the tables read by
-  `@pxt.query` UDFs. The search starts at the computed columns of the written tables and the unstored columns of the
-  read tables. It follows nested query calls and references to unstored computed columns.
+  `@pxt.query` UDFs. The search starts at the computed columns of the written tables, the unstored columns of the
+  read tables, and the operation's own expressions, such as a query's clauses, update values or a new computed
+  column. `compute()` evaluates the stored computed columns of its table as well. The search follows nested
+  query calls and references to unstored computed columns.
 
 Acquire all store table locks in a single global order, sorted by store table name. Then acquire directory
 locks in catalog-path order. Every transaction follows this order to avoid deadlocks.
@@ -119,9 +121,9 @@ table's versioning. On a cache miss, read raw `tables` rows in a separate metada
 Catalog paths always require a store read because Catalog does not cache directory structure or path resolution.
 Both cached and stored results can become stale before lock acquisition.
 
-Queried paths come from cached column definitions only: raw `tables` rows contain serialized expressions, which the
-store read does not deserialize. An attempt therefore also locks the previous attempt's queried paths.
-With a cold cache, an operation whose targets query other tables takes two attempts: the first finds its queried
+Finding queried paths requires cached metadata: raw `tables` rows contain serialized expressions, which the store
+read does not deserialize. An attempt therefore also locks the previous attempt's queried paths.
+With a cold cache, an operation that queries other tables takes two attempts: the first finds its queried
 paths after locking and fails validation, and the second locks them.
 
 A table's ancestors, store table name, and versioning are fixed at creation, though an ancestor may have been
@@ -224,6 +226,5 @@ The implementation checks key locking requirements:
 - `StoreBase` calls `assert_rows_write_locked()` before writing store rows.
 
 `SqlNode` calls `check_rows_read_locked()`, which currently warns rather than asserts. The lock set does not yet
-include the tables read by `@pxt.query` calls in two places: the operation's own expressions, such as the new column
-in `add_computed_column()`, and view population during finalization (PXT-1343). Once it does, the warning can become
-an assertion.
+include the tables read by `@pxt.query` calls during finalization, such as when it populates a new view (PXT-1343).
+Once it does, the warning can become an assertion.

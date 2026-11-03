@@ -279,7 +279,7 @@ class LocalTable(Table):
         path = self._tbl_version_path
         self._validate_compute()
         try:
-            with get_runtime().catalog.begin_data_read_xact(tbl_keys=path.tbl_keys):
+            with get_runtime().catalog.begin_data_read_xact(tvps=[path], eval_computed_cols=True):
                 output_md = self._resolve_compute_outputs(outputs)
                 # input rows supply values for the base table's columns
                 base_tbl = self._get_base_tables()[-1] if path.is_view() else self
@@ -595,7 +595,11 @@ class LocalTable(Table):
         from pixeltable.catalog import retry_md_write_loop
 
         # a retry loop is necessary because drop column needs it.
-        @retry_md_write_loop(tvps=[self._tbl_version_path], lock_mutable_tree=True)
+        @retry_md_write_loop(
+            tvps=[self._tbl_version_path],
+            lock_mutable_tree=True,
+            eval_exprs=[spec for spec in kwargs.values() if isinstance(spec, exprs.Expr)],
+        )
         def do_add_computed_column() -> UpdateStatus:
             self._check_mutable('add columns to')
             self._check_single_column_kwarg(
@@ -813,7 +817,11 @@ class LocalTable(Table):
         self._check_single_column_kwarg('alter_computed_column', '`col_name=expression`', kwargs)
         col_name, spec = next(iter(kwargs.items()))
 
-        @retry_md_write_loop(tvps=[self._tbl_version_path], lock_mutable_tree=True)
+        @retry_md_write_loop(
+            tvps=[self._tbl_version_path],
+            lock_mutable_tree=True,
+            eval_exprs=[spec] if isinstance(spec, exprs.Expr) else None,
+        )
         def do_alter_computed_column() -> UpdateStatus:
             self._check_mutable('alter columns of')
 
@@ -1160,7 +1168,10 @@ class LocalTable(Table):
         self._validate_update_value_spec(value_spec)
         self._validate_where(where)
         telemetry.add_attrs(telemetry.func_span(), **telemetry_schemas.OpAttrs(table_id=str(self._id)))
-        with get_runtime().catalog.begin_data_write_xact(tvps=[self._tbl_version_path]):
+        with get_runtime().catalog.begin_data_write_xact(
+            tvps=[self._tbl_version_path],
+            eval_exprs=[val for val in value_spec.values() if isinstance(val, exprs.Expr)],
+        ):
             self._check_mutable('update')
             tv = self._tbl_version.get()
             result = tv.update(value_spec, where, cascade, return_rows=return_rows)

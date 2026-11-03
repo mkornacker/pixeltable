@@ -3075,8 +3075,6 @@ class TestTableModel:
             [{'topic': 'cats', 'titles': ['a', 'b']}, {'topic': 'cows', 'titles': []}]
         ]
 
-    # PXT-1343: a @pxt.query UDF's table is not in the operation's lock set
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     def test_update_all_nested_query_udf_over_model(self, db_root: DatabaseRoot) -> None:
         """`update_all()` creates every model a new column queries, including through a nested query udf."""
         TableModel = pxt.model_base()

@@ -147,8 +147,12 @@ def retry_md_write_loop(
     lock_mutable_tree: bool = False,
     paths: Collection[Path] | None = None,
     lock_path_subtree: bool = False,
+    eval_exprs: Collection[exprs.Expr] | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """Retry a metadata write or DDL operation, taking exclusive locks on its targets."""
+    """Retry a metadata write or DDL operation, taking exclusive locks on its targets.
+
+    The operation also evaluates `eval_exprs`, such as the value of a new computed column.
+    """
     return _retry_loop(
         LockRequest(
             TblOpClass.MD_WRITE,
@@ -157,6 +161,7 @@ def retry_md_write_loop(
             lock_mutable_tree=lock_mutable_tree,
             write_paths=paths,
             lock_path_subtree=lock_path_subtree,
+            eval_exprs=eval_exprs,
         )
     )
 
@@ -240,8 +245,8 @@ class PendingTableOpsError(Exception):
 
 
 class _QueriedPaths:
-    """Collects the paths of the tables queried by column value_exprs, recursing into nested queries and referenced
-    unstored columns.
+    """Collects the paths of the tables queried by expressions, recursing into nested queries and referenced unstored
+    columns.
     """
 
     lookup: Callable[[TableVersionKey], TableVersion | None]
@@ -261,10 +266,10 @@ class _QueriedPaths:
             if col.value_expr is not None and col.qid not in self.visited:
                 self.visited.add(col.qid)
                 value_exprs.append(col.value_expr)
-        self._add_exprs(value_exprs)
+        self.add_exprs(value_exprs)
 
-    def _add_exprs(self, value_exprs: Iterable[exprs.Expr]) -> None:
-        for e in exprs.Expr.list_subexprs(value_exprs):
+    def add_exprs(self, exprs_: Iterable[exprs.Expr]) -> None:
+        for e in exprs.Expr.list_subexprs(exprs_):
             if isinstance(e, exprs.ColumnRef):
                 col_md = e.col_md
                 if col_md.is_computed and not col_md.is_stored:
@@ -287,7 +292,7 @@ class _QueriedPaths:
                     if not query.has_select_list:
                         # the query selects all columns of its from-clause tables
                         self.add_cols(col for tv in tvs for col in tv.cols_by_id.values() if not col.is_stored)
-                self._add_exprs(query._component_exprs())
+                self.add_exprs(query._component_exprs())
 
 
 class Catalog(CatalogBase):
@@ -458,27 +463,51 @@ class Catalog(CatalogBase):
 
     @contextmanager
     def begin_data_read_xact(
-        self, *, tvps: Collection[TableVersionPath] | None = None, tbl_keys: Collection[TableVersionKey] | None = None
+        self,
+        *,
+        tvps: Collection[TableVersionPath] | None = None,
+        eval_computed_cols: bool = False,
+        tbl_keys: Collection[TableVersionKey] | None = None,
+        eval_exprs: Collection[exprs.Expr] | None = None,
     ) -> Iterator[sql.Connection]:
         """Open a data-read transaction, locking the targets and their base tables.
 
-        Reading a view requires read locks on its bases because the query also reads their rows.
+        Reading a view requires read locks on its bases because the query also reads their rows. With
+        `eval_computed_cols`, the operation evaluates the stored computed columns of `tvps` instead of reading them.
+        The operation also evaluates `eval_exprs`, such as a query's clauses.
         """
-        request = LockRequest(TblOpClass.DATA_READ, read_tvps=tvps, read_tbl_keys=tbl_keys)
+        request = LockRequest(
+            TblOpClass.DATA_READ,
+            read_tvps=tvps,
+            eval_computed_cols=eval_computed_cols,
+            read_tbl_keys=tbl_keys,
+            eval_exprs=eval_exprs,
+        )
         with self._begin_xact(request) as conn:
             yield conn
 
     @contextmanager
     def begin_data_write_xact(
-        self, *, read_tbl_keys: Collection[TableVersionKey] | None = None, tvps: Collection[TableVersionPath]
+        self,
+        *,
+        read_tvps: Collection[TableVersionPath] | None = None,
+        read_tbl_keys: Collection[TableVersionKey] | None = None,
+        tvps: Collection[TableVersionPath],
+        eval_exprs: Collection[exprs.Expr] | None = None,
     ) -> Iterator[sql.Connection]:
         """Open a transaction to insert, update, or delete rows.
 
-        Lock each target and all its mutable views, since writes propagate to those views. `read_tbl_keys` identifies
-        additional tables read by the operation, such as the source of an insert from a query.
+        Lock each target and all its mutable views, since writes propagate to those views. `read_tvps` and
+        `read_tbl_keys` identify additional tables read by the operation, such as the source of an insert from a query.
+        The operation also evaluates `eval_exprs`, such as update values.
         """
         request = LockRequest(
-            TblOpClass.DATA_WRITE, read_tbl_keys=read_tbl_keys, write_tvps=tvps, lock_mutable_tree=True
+            TblOpClass.DATA_WRITE,
+            read_tvps=read_tvps,
+            read_tbl_keys=read_tbl_keys,
+            write_tvps=tvps,
+            lock_mutable_tree=True,
+            eval_exprs=eval_exprs,
         )
         with self._begin_xact(request) as conn:
             yield conn
@@ -829,8 +858,7 @@ class Catalog(CatalogBase):
     def check_rows_read_locked(self, tv: TableVersion) -> None:
         """Warn if the transaction lacks a read lock on this table.
 
-        TODO(PXT-1343): turn this into an assertion once the lock set includes the tables queried by the operation's
-        own expressions and by finalization.
+        TODO(PXT-1343): turn this into an assertion once the lock set includes the tables queried during finalization.
         """
         read_lock_mode = TblOpClass.DATA_READ.tbl_lock_mode(tv.is_data_versioned)
         if not self._is_tbl_locked(tv.id, read_lock_mode):
@@ -876,7 +904,8 @@ class Catalog(CatalogBase):
         self, request: LockRequest, lookup: Callable[[TableVersionKey], TableVersion | None]
     ) -> list[list[TableVersionKey]]:
         """Return the paths queried by the computed columns of the mutable write targets and of the mutable views
-        locked with them, and by the unstored columns of the read paths.
+        locked with them, by the unstored columns of the read paths (all computed columns with eval_computed_cols), and
+        by the request's eval_exprs.
 
         Skip the tables for which lookup() returns None.
         """
@@ -892,7 +921,10 @@ class Catalog(CatalogBase):
             for key in tvp.tbl_keys:
                 tv = lookup(key)
                 if tv is not None:
-                    queried.add_cols(col for col in tv.cols_by_id.values() if not col.is_stored)
+                    queried.add_cols(
+                        col for col in tv.cols_by_id.values() if request.eval_computed_cols or not col.is_stored
+                    )
+        queried.add_exprs(request.eval_exprs)
         return queried.paths
 
     def _cached_tbl_version(self, key: TableVersionKey) -> TableVersion | None:
@@ -2094,8 +2126,14 @@ class Catalog(CatalogBase):
         # - this call applies it in a later write transaction
         fault_injection.process_fault(FaultLocation.CATALOG_UPDATE_FROM_MODEL_BEFORE_APPLY)
         tbl_ids = [change_set['tbl_id'] for change_set in change_sets]
+        value_exprs = [
+            spec['value']
+            for change_set in change_sets
+            for spec, _ in [*change_set['new_columns'].values(), *change_set['altered_columns'].values()]
+            if 'value' in spec
+        ]
 
-        @retry_md_write_loop(tbl_ids=tbl_ids, lock_mutable_tree=True)
+        @retry_md_write_loop(tbl_ids=tbl_ids, lock_mutable_tree=True, eval_exprs=value_exprs)
         def update_fn() -> None:
             tbls = [self.get_table_by_id(tbl_id, ignore_if_dropped=True) for tbl_id in tbl_ids]
             # check for tables that were dropped since the diff was computed

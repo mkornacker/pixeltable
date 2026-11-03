@@ -815,6 +815,7 @@ class TestLocking:
         assert telemetry_recorder.counter_total(telemetry_schemas.lock_set_restarts) == 0
         (
             MultiThreadedScenario()
+            .then_run(thread_id=1, name='read names, which caches its metadata', fn=names.count)
             .then_inject_fault(thread_id=0, loc=FaultLocation.CATALOG_BEFORE_TBL_LOCK, fault=fault)
             .then_run_until(
                 thread_id=0,

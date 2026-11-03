@@ -156,8 +156,12 @@ class InsertableTable(LocalTable):
         start_ts = time.perf_counter()
         status = pxt.UpdateStatus()
         query = data_source.pxt_query if isinstance(data_source, QueryTableDataConduit) else None
-        read_tbl_keys = query.referenced_tbl_keys() if query is not None else None
-        with get_runtime().catalog.begin_data_write_xact(read_tbl_keys=read_tbl_keys, tvps=[self._tbl_version_path]):
+        with get_runtime().catalog.begin_data_write_xact(
+            read_tvps=query._from_clause.tvps if query is not None else None,
+            read_tbl_keys=query.referenced_tbl_keys() if query is not None else None,
+            tvps=[self._tbl_version_path],
+            eval_exprs=query._component_exprs() if query is not None else None,
+        ):
             data_source.add_table_info(self)
             data_source.prepare_for_insert_into_table()
             # in on_error='abort' mode the exec raises the internal ExprEvalError on the first failing cell;

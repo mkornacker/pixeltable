@@ -25,6 +25,8 @@ from .path import Path
 from .types import TableVersionKey
 
 if TYPE_CHECKING:
+    from pixeltable import exprs
+
     from .table_path import TableVersionPath
     from .table_version import TableVersion
     from .table_version_handle import TableVersionHandle
@@ -155,6 +157,8 @@ class LockRequest:
     op_class: TblOpClass
     # tables whose rows the operation reads, along with their bases
     read_tvps: Collection[TableVersionPath]
+    # the operation evaluates the stored computed columns of read_tvps instead of reading them
+    eval_computed_cols: bool
     read_tbl_keys: Collection[TableVersionKey]
     # tables the operation writes as op_class; the bases of write_tvps are read
     write_tvps: Collection[TableVersionPath]
@@ -165,27 +169,33 @@ class LockRequest:
     write_paths: Collection[Path]
     # also lock each directory's descendants and tables, or each table's views and snapshots
     lock_path_subtree: bool
+    # evaluated by the operation besides its targets' columns, such as update values
+    eval_exprs: Collection[exprs.Expr]
 
     def __init__(
         self,
         op_class: TblOpClass,
         *,
         read_tvps: Collection[TableVersionPath] | None = None,
+        eval_computed_cols: bool = False,
         read_tbl_keys: Collection[TableVersionKey] | None = None,
         write_tvps: Collection[TableVersionPath] | None = None,
         write_tbl_ids: Collection[UUID] | None = None,
         lock_mutable_tree: bool = False,
         write_paths: Collection[Path] | None = None,
         lock_path_subtree: bool = False,
+        eval_exprs: Collection[exprs.Expr] | None = None,
     ) -> None:
         self.op_class = op_class
         self.read_tvps = read_tvps or ()
+        self.eval_computed_cols = eval_computed_cols
         self.read_tbl_keys = read_tbl_keys or ()
         self.write_tvps = write_tvps or ()
         self.write_tbl_ids = write_tbl_ids or ()
         self.lock_mutable_tree = lock_mutable_tree
         self.write_paths = write_paths or ()
         self.lock_path_subtree = lock_path_subtree
+        self.eval_exprs = eval_exprs or ()
         assert self.for_write or not (self.write_tvps or self.write_tbl_ids or self.write_paths), op_class
         assert self.op_class is not TblOpClass.DATA_READ or (self.read_tvps or self.read_tbl_keys), (
             'DATA_READ requires at least one table or table path'

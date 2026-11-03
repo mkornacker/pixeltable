@@ -279,7 +279,10 @@ def create_table(
             if isinstance(data_source, QueryTableDataConduit):
                 query = data_source.pxt_query
                 with get_runtime().catalog.begin_data_write_xact(
-                    read_tbl_keys=query.referenced_tbl_keys(), tvps=[tbl._tbl_version_path]
+                    read_tvps=query._from_clause.tvps,
+                    read_tbl_keys=query.referenced_tbl_keys(),
+                    tvps=[tbl._tbl_version_path],
+                    eval_exprs=query._component_exprs(),
                 ):
                     tbl._tbl_version.get().insert(None, query, fail_on_exception=fail_on_exception)
             elif not is_direct_query:

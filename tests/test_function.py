@@ -922,8 +922,6 @@ class TestFunction:
             [{'g': 0, 's': 2, 'scaled': 20}, {'g': 1, 's': 4, 'scaled': 20}],
         ]
 
-    # PXT-1343: a @pxt.query UDF's table is not in the operation's lock set
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     def test_query2(self, db_root: DatabaseRoot) -> None:
         p = db_root.make_catalog_path
         schema: dict[str, Any] = {'query_text': pxt.String | None, 'i': pxt.Int | None}
@@ -1183,6 +1181,47 @@ class TestFunction:
             'read_result': [['x']],
         }
 
+    def test_query_in_operation_exprs(self, db_root: DatabaseRoot) -> None:
+        """
+        Queries, updates, schema changes, compute() and inserts from a query evaluate @pxt.query calls in their own
+        expressions, including calls nested in another expression.
+        """
+        p = db_root.make_catalog_path
+        pxt.create_dir(p('test'))
+        src = pxt.create_table(p('test/src'), {'a': pxt.String | None})
+        src.insert(a='x')
+
+        @pxt.query
+        def retrieve() -> pxt.Query:
+            return src.select(src.a)
+
+        # until the alter_computed_column() below, no column of t queries src
+        t = pxt.create_table(p('test/tbl'), {'n': pxt.Int, 'j': pxt.Json | None})
+        t.add_computed_column(computed=t.n + 1)
+        t.insert(n=1)
+        assert t.select(cnt=pxtf.json.len(retrieve())).collect()['cnt'] == [1]
+        assert len(t.where(pxtf.json.len(retrieve()) == 1).collect()) == 1
+        validate_update_status(t.update({'j': retrieve()}), expected_rows=1)
+        u = pxt.create_table(p('test/u'), {'n': pxt.Int | None, 'r': pxt.Json | None})
+        validate_update_status(u.insert(t.select(t.n, r=retrieve()[0])), expected_rows=1)
+        t.alter_computed_column(computed=pxtf.json.len(retrieve()) + 1)
+        assert t.collect()[0] == {'n': 1, 'j': ['x'], 'computed': 2}
+        assert [row['computed'] for row in t.compute([{'n': 2}])] == [2]
+
+        other = pxt.create_table(p('test/other'), {'n': pxt.Int | None})
+        other.insert(n=1)
+        other.add_computed_column(cnt=pxtf.json.len(retrieve()))
+        assert other.select(other.cnt).collect()['cnt'] == [1]
+
+        # the source queries src through an unstored column, with and without a select list
+        s = pxt.create_table(p('test/s'), {'n': pxt.Int | None})
+        s.add_computed_column(r=retrieve(), stored=False)
+        s.insert(n=2)
+        validate_update_status(u.insert(s), expected_rows=1)
+        created = pxt.create_table(p('test/created'), source=s.select(s.n, s.r))
+        assert u.order_by(u.n).select(u.r).collect()['r'] == ['x', ['x']]
+        assert created.select(created.r).collect()['r'] == [['x']]
+
     def test_query_with_limit(self, test_tbl: pxt.Table) -> None:
         """@pxt.query bodies that use limit() with differently-shaped limit arguments."""
         t = test_tbl
@@ -1292,8 +1331,6 @@ class TestFunction:
 
         assert_type_eq(c.signature.return_type, pxt.Json[[{'c': pxt.Int | None}]])
 
-    # PXT-1343: a @pxt.query UDF's table is not in the operation's lock set
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     def test_query_udf_after_drop(self, db_root: DatabaseRoot) -> None:
         """Stored computed columns whose value_expr contains a @pxt.query UDF must remain loadable
         after the UDF's referenced column or table is dropped. The reload path must deserialize the
