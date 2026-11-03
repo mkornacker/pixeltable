@@ -288,12 +288,19 @@ class XactLocks:
     _locked_dir_ids: set[UUID] = dataclasses.field(default_factory=set, init=False)
 
     @classmethod
-    def from_cache(cls, request: LockRequest, tbl_versions: Mapping[TableVersionKey, TableVersion]) -> XactLocks | None:
+    def from_cache(
+        cls,
+        request: LockRequest,
+        tbl_versions: Mapping[TableVersionKey, TableVersion],
+        *,
+        queried_paths: Iterable[Sequence[TableVersionKey]] = (),
+    ) -> XactLocks | None:
         """Build a tentative lock set from cached metadata, without querying the store.
 
         Return None if required metadata is missing. Cached metadata may be stale, so validate the set after locking.
         Include each target's bases for read and, when `lock_mutable_tree` is True, each write target's mutable views.
         Apply the request's `op_class` to write targets and their affected views. Catalog paths are not supported.
+        Lock the tables of `queried_paths` for read; each path lists its keys in TablePath.tbl_keys order.
         """
         assert len(request.write_paths) == 0, request.write_paths
         op_class = request.op_class
@@ -311,10 +318,12 @@ class XactLocks:
             for write_tbl_id in request.mutable_write_tbl_ids():
                 if not locks.add_mutable_tree_from_cache(write_tbl_id, tbl_versions):
                     return None
+        if not locks.add_read_paths_from_cache(queried_paths, tbl_versions):
+            return None
         return locks
 
     @classmethod
-    def from_store(cls, request: LockRequest) -> XactLocks:
+    def from_store(cls, request: LockRequest, *, queried_paths: Iterable[Sequence[TableVersionKey]] = ()) -> XactLocks:
         """Build a lock set from stored metadata in the current transaction.
 
         Read raw `tables` rows without constructing TableVersion instances, so pending operations do not prevent
@@ -322,10 +331,11 @@ class XactLocks:
         lookups include only visible tables.
 
         Apply the request's `op_class` to write targets and the views or subtrees affected by their writes. Lock other
-        tables, including ancestors, for read. If a table has several roles, use the strongest required mode.
+        tables, including ancestors and the tables of `queried_paths`, for read. If a table has several roles, use the
+        strongest required mode.
         """
         assert get_runtime().in_xact
-        return _LockSetBuilder(request).build()
+        return _LockSetBuilder(request, queried_paths).build()
 
     def _add_path_from_cache(
         self,
@@ -381,6 +391,12 @@ class XactLocks:
             self._add_tv(tv, self.request.op_class)
             remaining_tbl_ids.extend(view.id for view in tv.mutable_views)
         return True
+
+    def add_read_paths_from_cache(
+        self, tbl_paths: Iterable[Sequence[TableVersionKey]], tbl_versions: Mapping[TableVersionKey, TableVersion]
+    ) -> bool:
+        """Add cached read lock targets for each path. Return False if any metadata is missing or uninitialized."""
+        return all(self._add_path_from_cache(tbl_path, TblOpClass.DATA_READ, tbl_versions) for tbl_path in tbl_paths)
 
     def _add_tv(self, tv: TableVersion, op_class: TblOpClass) -> None:
         target = LockTarget(
@@ -490,6 +506,8 @@ class _LockSetBuilder:
     """Collects a LockRequest's lock requirements from stored metadata."""
 
     request: LockRequest
+    # further paths to lock for read
+    queried_paths: Iterable[Sequence[TableVersionKey]]
     conn: sql.Connection
     # Table id -> required operation classes. Start with requested targets, then add related tables.
     # Requested ids may refer to tables that have already been dropped.
@@ -505,8 +523,9 @@ class _LockSetBuilder:
     # table id -> base id, only for views whose finalization will advance the base's view_sn
     finalized_view_bases: dict[UUID, UUID]
 
-    def __init__(self, request: LockRequest) -> None:
+    def __init__(self, request: LockRequest, queried_paths: Iterable[Sequence[TableVersionKey]]) -> None:
         self.request = request
+        self.queried_paths = queried_paths
         self.conn = get_runtime().conn
         self.tbl_id_to_op_classes = defaultdict(set)
         self.store_tbls = {}
@@ -542,7 +561,7 @@ class _LockSetBuilder:
                 self.tbl_id_to_op_classes[key.tbl_id].add(
                     self.request.op_class if is_live_tbl_leaf else TblOpClass.DATA_READ
                 )
-        for key in self.request.read_tbl_keys:
+        for key in itertools.chain(self.request.read_tbl_keys, *self.queried_paths):
             self.tbl_id_to_op_classes[key.tbl_id].add(TblOpClass.DATA_READ)
         for tbl_id in self.request.write_tbl_ids:
             self.tbl_id_to_op_classes[tbl_id].add(self.request.op_class)

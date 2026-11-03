@@ -239,6 +239,57 @@ class PendingTableOpsError(Exception):
         self.tbl_id = tbl_id
 
 
+class _QueriedPaths:
+    """Collects the paths of the tables queried by column value_exprs, recursing into nested queries and referenced
+    unstored columns.
+    """
+
+    lookup: Callable[[TableVersionKey], TableVersion | None]
+    # the paths for which lookup() returned every table, each in TablePath.tbl_keys order
+    paths: list[list[TableVersionKey]]
+    visited: set[QColumnId]
+
+    def __init__(self, lookup: Callable[[TableVersionKey], TableVersion | None]) -> None:
+        self.lookup = lookup
+        self.paths = []
+        self.visited = set()
+
+    def add_cols(self, cols: Iterable[Column]) -> None:
+        """Add the paths queried by the value_exprs of cols."""
+        value_exprs: list[exprs.Expr] = []
+        for col in cols:
+            if col.value_expr is not None and col.qid not in self.visited:
+                self.visited.add(col.qid)
+                value_exprs.append(col.value_expr)
+        self._add_exprs(value_exprs)
+
+    def _add_exprs(self, value_exprs: Iterable[exprs.Expr]) -> None:
+        for e in exprs.Expr.list_subexprs(value_exprs):
+            if isinstance(e, exprs.ColumnRef):
+                col_md = e.col_md
+                if col_md.is_computed and not col_md.is_stored:
+                    tv = self.lookup(TableVersionKey(col_md.qcolid.tbl_id, col_md.col_effective_version))
+                    # queries in other tables don't block drop_column()
+                    if tv is not None and col_md.qcolid.col_id in tv.cols_by_id:
+                        self.add_cols([tv.cols_by_id[col_md.qcolid.col_id]])
+            elif (
+                isinstance(e, exprs.FunctionCall)
+                and isinstance(e.fn, func.QueryTemplateFunction)
+                and e.fn.queries_tables
+            ):
+                query = e.fn.template_query
+                assert query is not None
+                for path in query.from_clause_tbl_keys():
+                    # ancestors first, as in _refresh_path_cache()
+                    tvs = [tv for tv in map(self.lookup, reversed(path)) if tv is not None]
+                    if len(tvs) == len(path):
+                        self.paths.append(path)
+                    if not query.has_select_list:
+                        # the query selects all columns of its from-clause tables
+                        self.add_cols(col for tv in tvs for col in tv.cols_by_id.values() if not col.is_stored)
+                self._add_exprs(query._component_exprs())
+
+
 class Catalog(CatalogBase):
     """Access catalog objects, manage their metadata cache, and coordinate concurrent operations.
 
@@ -495,6 +546,8 @@ class Catalog(CatalogBase):
         num_retries = 0
         pending_ops_tbl_id: UUID | None = None
         has_exc = False  # True if we exited the 'with ...begin_xact()' block with an exception
+        # the attempt's tentative queried paths, then those in its refreshed metadata
+        queried_paths: list[list[TableVersionKey]] = []
         while True:
             if pending_ops_tbl_id is not None:
                 Env.get().console_logger.debug(f'_begin_xact(): finalizing pending ops for {pending_ops_tbl_id}')
@@ -502,7 +555,8 @@ class Catalog(CatalogBase):
                 pending_ops_tbl_id = None
 
             try:
-                xact_locks = self._resolve_lock_set(request)
+                queried_paths = self._tentative_queried_paths(request, queried_paths)
+                xact_locks = self._resolve_lock_set(request, queried_paths)
             except PendingTableOpsError as e:
                 if not finalize_pending_ops:
                     raise
@@ -538,8 +592,8 @@ class Catalog(CatalogBase):
                             xact_locks.acquire()
                             # LOCK TABLE leaves the snapshot unset, so this refresh sees changes committed
                             # while we waited for store table locks.
-                            self._refresh_md_cache(request, check_pending_ops=finalize_pending_ops)
-                            self._validate_lock_set(request)
+                            queried_paths = self._refresh_md_cache(request, check_pending_ops=finalize_pending_ops)
+                            self._validate_lock_set(request, queried_paths)
                             if for_write and request.lock_mutable_tree:
                                 self._compute_column_dependents(request.mutable_write_tbl_ids())
                             if _logger.isEnabledFor(logging.DEBUG):
@@ -656,7 +710,22 @@ class Catalog(CatalogBase):
         except sql_exc.DBAPIError:
             pass
 
-    def _resolve_lock_set(self, request: LockRequest) -> XactLocks:
+    def _tentative_queried_paths(
+        self, request: LockRequest, prev_queried_paths: list[list[TableVersionKey]]
+    ) -> list[list[TableVersionKey]]:
+        """Return the queried paths in cached metadata, along with `prev_queried_paths`.
+
+        `prev_queried_paths` are the previous attempt's paths. They supply the targets' queried paths when the targets'
+        metadata is not cached, as after a stale lock set.
+        """
+        # _refresh_md_cache() can't validate a finalization's queried paths: it doesn't load the targets
+        if request.op_class is TblOpClass.FINALIZE:
+            return []
+        paths = [*self._queried_paths(request, self._cached_tbl_version), *prev_queried_paths]
+        # prev_queried_paths can repeat cached paths
+        return list({tuple(path): path for path in paths}.values())
+
+    def _resolve_lock_set(self, request: LockRequest, queried_paths: list[list[TableVersionKey]]) -> XactLocks:
         """Build a tentative lock set from cached metadata or a separate store transaction."""
         assert not get_runtime().in_xact
         # Metadata-only reads do not take locks
@@ -665,18 +734,19 @@ class Catalog(CatalogBase):
 
         # Read catalog paths and pending operations from the store: neither is cached.
         if len(request.write_paths) == 0 and request.op_class is not TblOpClass.FINALIZE:
-            xact_locks = XactLocks.from_cache(request, self._tbl_versions)
+            xact_locks = XactLocks.from_cache(request, self._tbl_versions, queried_paths=queried_paths)
             if xact_locks is not None:
                 return xact_locks
 
         with self.begin_md_read_xact():
-            return XactLocks.from_store(request)
+            return XactLocks.from_store(request, queried_paths=queried_paths)
 
-    def _validate_lock_set(self, request: LockRequest) -> None:
-        """Check that the held locks cover the operation's targets according to refreshed metadata.
+    def _validate_lock_set(self, request: LockRequest, queried_paths: list[list[TableVersionKey]]) -> None:
+        """Check that the held locks cover the operation's targets and `queried_paths` according to refreshed metadata.
 
-        Mutable views and catalog paths can change between building the lock set and acquiring its locks.
-        Validate them after locking. A table's ancestors never change, so their locks need no further validation.
+        Mutable views, queried paths and catalog paths can change between building the lock set and acquiring its
+        locks. Validate them after locking. A table's ancestors never change, so their locks need no further
+        validation.
 
         Raises:
             StaleLockSetError: a required table or directory lock is missing, or a table lock is too weak.
@@ -699,6 +769,11 @@ class Catalog(CatalogBase):
                     _logger.debug(msg)
                     raise StaleLockSetError(msg)
             validate_covered(mutable_trees)
+
+        queried_tbls = XactLocks(request)
+        is_cached = queried_tbls.add_read_paths_from_cache(queried_paths, self._tbl_versions)
+        assert is_cached, queried_paths
+        validate_covered(queried_tbls)
 
         if len(request.write_paths) > 0:
             # Resolve paths again under the acquired locks and check for targets added since the initial store read.
@@ -754,8 +829,8 @@ class Catalog(CatalogBase):
     def check_rows_read_locked(self, tv: TableVersion) -> None:
         """Warn if the transaction lacks a read lock on this table.
 
-        TODO(PXT-1343): turn this into an assertion once the lock set includes all tables read by query UDFs
-        in computed columns.
+        TODO(PXT-1343): turn this into an assertion once the lock set includes the tables queried by the operation's
+        own expressions and by finalization.
         """
         read_lock_mode = TblOpClass.DATA_READ.tbl_lock_mode(tv.is_data_versioned)
         if not self._is_tbl_locked(tv.id, read_lock_mode):
@@ -765,11 +840,10 @@ class Catalog(CatalogBase):
                 stacklevel=2,
             )
 
-    def _refresh_md_cache(self, request: LockRequest, *, check_pending_ops: bool) -> None:
+    def _refresh_md_cache(self, request: LockRequest, *, check_pending_ops: bool) -> list[list[TableVersionKey]]:
         """Refresh metadata for all read and write targets and their mutable views, if requested.
 
-        If check_pending_ops is True, also load the tables queried by the mutable write targets' computed columns and
-        the read targets' unstored columns.
+        If check_pending_ops is True, also load the tables of the targets' queried paths and return those paths.
         """
         # Track refreshed write targets and views to avoid loading the same table twice.
         refreshed: set[UUID] = set()
@@ -794,60 +868,36 @@ class Catalog(CatalogBase):
             self._refresh_tbl_cache(key=read_key, check_pending_ops=check_pending_ops)
 
         # _refresh_tbl_cache() loads the write targets only if check_pending_ops is True
-        if check_pending_ops:
-            visited: set[QColumnId] = set()
-            for tbl_id in refreshed:
-                # a snapshot has no live version, and no write evaluates its computed columns
-                tv = self._tbl_versions.get(TableVersionKey(tbl_id, None))
+        if not check_pending_ops:
+            return []
+        return self._queried_paths(request, self._referenced_tbl_version)
+
+    def _queried_paths(
+        self, request: LockRequest, lookup: Callable[[TableVersionKey], TableVersion | None]
+    ) -> list[list[TableVersionKey]]:
+        """Return the paths queried by the computed columns of the mutable write targets and of the mutable views
+        locked with them, and by the unstored columns of the read paths.
+
+        Skip the tables for which lookup() returns None.
+        """
+        queried = _QueriedPaths(lookup)
+        write_tbl_ids = request.mutable_write_tbl_ids()
+        while len(write_tbl_ids) > 0:
+            tv = lookup(TableVersionKey(write_tbl_ids.pop(), None))
+            if tv is not None:
+                queried.add_cols(tv.cols_by_id.values())
+                if request.lock_mutable_tree:
+                    write_tbl_ids.extend(view.id for view in tv.mutable_views)
+        for tvp in request.read_tvps:
+            for key in tvp.tbl_keys:
+                tv = lookup(key)
                 if tv is not None:
-                    self._load_col_queried_tbl_versions(tv.cols_by_id.values(), visited)
-            for tvp in request.read_tvps:
-                for tvh in tvp.get_tbl_versions():
-                    tv = self._tbl_versions[tvh.key]
-                    self._load_col_queried_tbl_versions(
-                        [col for col in tv.cols_by_id.values() if not col.is_stored], visited
-                    )
+                    queried.add_cols(col for col in tv.cols_by_id.values() if not col.is_stored)
+        return queried.paths
 
-    def _load_queried_tbl_versions(self, value_exprs: Iterable[exprs.Expr], visited: set[QColumnId]) -> None:
-        """
-        Load and validate the table versions queried by value_exprs, recursing into nested queries and referenced
-        unstored columns.
-        """
-        for e in exprs.Expr.list_subexprs(value_exprs):
-            if isinstance(e, exprs.ColumnRef):
-                col_md = e.col_md
-                if col_md.is_computed and not col_md.is_stored:
-                    tv = self._referenced_tbl_version(
-                        TableVersionKey(col_md.qcolid.tbl_id, col_md.col_effective_version)
-                    )
-                    # queries in other tables don't block drop_column()
-                    if tv is not None and col_md.qcolid.col_id in tv.cols_by_id:
-                        self._load_col_queried_tbl_versions([tv.cols_by_id[col_md.qcolid.col_id]], visited)
-            elif (
-                isinstance(e, exprs.FunctionCall)
-                and isinstance(e.fn, func.QueryTemplateFunction)
-                and e.fn.queries_tables
-            ):
-                query = e.fn.template_query
-                assert query is not None
-                # ancestors first, as in _refresh_path_cache()
-                tvs = [self._referenced_tbl_version(key) for key in reversed(query.from_clause_tbl_version_keys())]
-                if not query.has_select_list:
-                    # the query selects all columns of its from-clause tables
-                    self._load_col_queried_tbl_versions(
-                        [col for tv in tvs if tv is not None for col in tv.cols_by_id.values() if not col.is_stored],
-                        visited,
-                    )
-                self._load_queried_tbl_versions(query._component_exprs(), visited)
-
-    def _load_col_queried_tbl_versions(self, cols: Iterable[Column], visited: set[QColumnId]) -> None:
-        """Load and validate the table versions queried by the value_exprs of cols."""
-        value_exprs: list[exprs.Expr] = []
-        for col in cols:
-            if col.value_expr is not None and col.qid not in visited:
-                visited.add(col.qid)
-                value_exprs.append(col.value_expr)
-        self._load_queried_tbl_versions(value_exprs, visited)
+    def _cached_tbl_version(self, key: TableVersionKey) -> TableVersion | None:
+        tv = self._tbl_versions.get(key)
+        return tv if tv is not None and tv.is_initialized else None
 
     def _referenced_tbl_version(self, key: TableVersionKey) -> TableVersion | None:
         """Return the validated TableVersion for key, or None if the table was dropped."""
@@ -857,6 +907,8 @@ class Catalog(CatalogBase):
             # a query over a dropped table fails when it's evaluated, not here
             if e.error_code != excs.ErrorCode.TABLE_NOT_FOUND:
                 raise
+            # keep the dropped table out of the next tentative lock set
+            self._clear_tv_cache(key)
             return None
 
     def _evict_caches(self) -> None:

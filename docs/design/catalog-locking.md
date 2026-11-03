@@ -73,7 +73,7 @@ A metadata read can still encounter pending operations while loading a table. It
 before continuing; finalization takes locks and may have to wait (section 7).
 
 If an expression reads another table, for example through a `@pxt.query` UDF, the transaction needs a read lock
-on that table too. Section 8 describes a current limitation.
+on that table too. Section 3 describes which of these tables the lock set includes; section 8 lists the gaps.
 
 ## 3. Which objects to lock
 
@@ -89,6 +89,9 @@ safely executed:
   including snapshots, and the directories containing them.
 - A pure snapshot has no store table. Its path includes the stored base versions to read; its own metadata is
   protected by its parent directory lock when created or deleted.
+- Every operation except finalization also locks its queried paths for read: the paths of the tables read by
+  `@pxt.query` UDFs. The search starts at the computed columns of the written tables and the unstored columns of the
+  read tables. It follows nested query calls and references to unstored computed columns.
 
 Acquire all store table locks in a single global order, sorted by store table name. Then acquire directory
 locks in catalog-path order. Every transaction follows this order to avoid deadlocks.
@@ -116,8 +119,13 @@ table's versioning. On a cache miss, read raw `tables` rows in a separate metada
 Catalog paths always require a store read because Catalog does not cache directory structure or path resolution.
 Both cached and stored results can become stale before lock acquisition.
 
+Queried paths come from cached column definitions only: raw `tables` rows contain serialized expressions, which the
+store read does not deserialize. An attempt therefore also locks the previous attempt's queried paths.
+With a cold cache, an operation whose targets query other tables takes two attempts: the first finds its queried
+paths after locking and fails validation, and the second locks them.
+
 A table's ancestors, store table name, and versioning are fixed at creation, though an ancestor may have been
-dropped. Mutable views and catalog paths can change and must be checked after locking.
+dropped. Mutable views, queried paths, and catalog paths can change and must be checked after locking.
 
 ### Why a tentative lock set is safe
 
@@ -127,8 +135,9 @@ lock set turns out to be stale.
 
 Validation runs once, so a validated set must stay valid until the transaction ends. Creating or dropping a mutable
 view requires `ACCESS EXCLUSIVE` on its base, which conflicts with every table lock Pixeltable uses, and changing a
-directory's entries requires its directory lock. Once the set is validated, other transactions cannot make changes
-that invalidate it until this transaction commits or rolls back.
+directory's entries requires its directory lock. The queried paths depend only on the column definitions of tables in
+the set, and changing a column definition requires `ACCESS EXCLUSIVE` on its table. Once the set is validated, other
+transactions cannot make changes that invalidate it until this transaction commits or rolls back.
 
 ### Retrying a stale lock set
 
@@ -214,6 +223,7 @@ The implementation checks key locking requirements:
   write. A new table and a pure snapshot are exempt: instead, they require a lock on the parent directory.
 - `StoreBase` calls `assert_rows_write_locked()` before writing store rows.
 
-`SqlNode` calls `check_rows_read_locked()`, which currently warns rather than asserts. Writes do not yet include
-all tables read by computed-column `@pxt.query` UDFs in their lock set (PXT-1343). Once that is fixed, the warning
-can become an assertion.
+`SqlNode` calls `check_rows_read_locked()`, which currently warns rather than asserts. The lock set does not yet
+include the tables read by `@pxt.query` calls in two places: the operation's own expressions, such as the new column
+in `add_computed_column()`, and view population during finalization (PXT-1343). Once it does, the warning can become
+an assertion.

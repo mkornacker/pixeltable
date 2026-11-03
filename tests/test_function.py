@@ -992,8 +992,6 @@ class TestFunction:
     @pytest.mark.filterwarnings(
         "ignore:The computed column '(result|unstored_result)' in table '(retrieval|src_view)' is no longer valid"
     )
-    # PXT-1343: a @pxt.query UDF's table is not in the operation's lock set
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     # 'text' is the view's own column, 'a' is inherited from tbl
     @pytest.mark.parametrize('col_name', ['text', 'a'])
     def test_query_over_view(self, db_root: DatabaseRoot, col_name: str) -> None:
@@ -1081,7 +1079,6 @@ class TestFunction:
         t.insert(a='y', b=2)
         assert t.where(t.a == 'y').select(t.result).collect()[0]['result'] == ['x']
 
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     def test_query_over_dropped_table(self, db_root: DatabaseRoot) -> None:
         """Writes that don't evaluate a stored query still work after its table is dropped."""
         p = db_root.make_catalog_path
@@ -1102,7 +1099,6 @@ class TestFunction:
         validate_update_status(t.insert(n=3), expected_rows=1)
         assert t.count() == 2
 
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     def test_query_over_dropped_column(self, db_root: DatabaseRoot) -> None:
         """A query over a dropped unstored column fails only when it's evaluated."""
         p = db_root.make_catalog_path
@@ -1124,7 +1120,6 @@ class TestFunction:
         with pxt_raises(pxt.ErrorCode.COLUMN_NOT_FOUND, match='Column was dropped'):
             t.insert(n=3)
 
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     def test_query_source_shapes(self, db_root: DatabaseRoot) -> None:
         """
         Inserts and reads evaluate queries that reach a view through a snapshot, an unstored column, a nested query,
@@ -1266,8 +1261,6 @@ class TestFunction:
             def q_str_offset(n: str) -> pxt.Query:
                 return t.select(t.c4).limit(10, offset=n)  # type: ignore[arg-type]
 
-    # PXT-1343: a @pxt.query UDF's table is not in the operation's lock set
-    @pytest.mark.filterwarnings('ignore:.*was not locked for read:pixeltable.exceptions.PixeltableWarning')
     def test_query_json_mapper(self, db_root: DatabaseRoot, reload_tester: ReloadTester) -> None:
         p = db_root.make_catalog_path
         t = pxt.create_table(p('test'), {'c1': pxt.Int | None, 'c2': pxt.Float | None})

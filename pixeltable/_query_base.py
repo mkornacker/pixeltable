@@ -341,8 +341,8 @@ class QueryBase(ABC):
         self._referenced_tbl_keys = tbl_keys
         return tbl_keys
 
-    def from_clause_tbl_version_keys(self) -> list[catalog.TableVersionKey]:
-        return [key for tp in self._from_clause.tbls for key in tp.key().keys]
+    def from_clause_tbl_keys(self) -> list[list[catalog.TableVersionKey]]:
+        return [tp.tbl_keys for tp in self._from_clause.tbls]
 
     def _descriptors(self) -> DescriptionHelper:
         helper = DescriptionHelper()

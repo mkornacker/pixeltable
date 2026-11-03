@@ -758,6 +758,133 @@ class TestLocking:
         assert base.count() == 1
         assert pxt.get_table('v', if_not_exists='ignore') is None
 
+    @pytest.mark.parametrize('op_class', [TblOpClass.DATA_READ, TblOpClass.DATA_WRITE])
+    def test_queried_tbl_lock(self, op_class: TblOpClass, uses_db: None, fault_injection: None) -> None:
+        """A schema change on a table that a @pxt.query UDF reads waits for an operation that evaluates the query."""
+        names = pxt.create_table('names', {'id': pxt.Int, 'name': pxt.String})
+        names.insert([{'id': 1, 'name': 'one'}])
+
+        @pxt.query
+        def lookup_name(id: int) -> pxt.Query:
+            return names.where(names.id == id).select(names.name)
+
+        t = pxt.create_table('tbl', {'a': pxt.Int})
+        # a read evaluates an unstored column, a write a stored one
+        t.add_computed_column(name=lookup_name(t.a), stored=op_class is TblOpClass.DATA_WRITE)
+        t.insert([{'a': 1}])
+        query = t.select(t.name)
+
+        def op() -> Any:
+            return query.collect() if op_class is TblOpClass.DATA_READ else t.insert([{'a': 1}])
+
+        fault = BlockFault(filter=lambda kwargs: kwargs['op_class'] is op_class)
+
+        (
+            MultiThreadedScenario()
+            .then_run(thread_id=0, name=f'first {op_class.value}, which caches the metadata', fn=op)
+            .then_inject_fault(thread_id=0, loc=FaultLocation.CATALOG_AFTER_TBL_LOCK, fault=fault)
+            .then_run_until(thread_id=0, name=f'{op_class.value} on tbl', event=fault.reached, fn=op)
+            .then_run_until(
+                thread_id=1,
+                name='schema change on names, which waits',
+                poll_condition=lambda: self.is_blocked_on_tbl_lock(names),
+                fn=lambda: names.add_column(b=pxt.Int | None),
+            )
+            .then_unblock(thread_id=2, fault=fault)
+            .execute()
+        )
+
+        t2 = pxt.get_table('tbl')
+        assert t2.select(t2.name).collect()['name'] == [['one']] * (3 if op_class is TblOpClass.DATA_WRITE else 1)
+
+    def test_stale_lock_set_query_added(
+        self, uses_db: None, fault_injection: None, telemetry_recorder: RecordingSubscriber
+    ) -> None:
+        """A write's tentative lock set is invalidated by a concurrent schema change that adds a @pxt.query call."""
+        names = pxt.create_table('names', {'id': pxt.Int, 'name': pxt.String})
+        names.insert([{'id': 1, 'name': 'one'}])
+
+        @pxt.query
+        def lookup_name(id: int) -> pxt.Query:
+            return names.where(names.id == id).select(names.name)
+
+        t = pxt.create_table('tbl', {'a': pxt.Int})
+        name_expr = lookup_name(t.a)
+        fault = BlockFault(filter=lambda kwargs: kwargs['op_class'] is TblOpClass.DATA_WRITE)
+
+        assert telemetry_recorder.counter_total(telemetry_schemas.lock_set_restarts) == 0
+        (
+            MultiThreadedScenario()
+            .then_inject_fault(thread_id=0, loc=FaultLocation.CATALOG_BEFORE_TBL_LOCK, fault=fault)
+            .then_run_until(
+                thread_id=0,
+                name='write to tbl, parked before it locks',
+                event=fault.reached,
+                fn=lambda: t.insert([{'a': 1}]),
+            )
+            .then_run(
+                thread_id=1, name='add a column that queries names', fn=lambda: t.add_computed_column(name=name_expr)
+            )
+            .then_unblock(thread_id=1, fault=fault)
+            .execute()
+        )
+        assert telemetry_recorder.counter_total(telemetry_schemas.lock_set_restarts) == 1
+
+        t2 = pxt.get_table('tbl')
+        assert t2.select(t2.name).collect()['name'] == [['one']]
+
+    def test_stale_lock_set_queried_tbl_dropped(
+        self, uses_db: None, fault_injection: None, telemetry_recorder: RecordingSubscriber
+    ) -> None:
+        """A write must retry once if a table that a @pxt.query UDF reads is dropped before lock acquisition.
+
+        Later writes must not retry. The query reaches the dropped table through an unstored column of another table,
+        whose cached metadata stays valid.
+        """
+        names = pxt.create_table('names', {'id': pxt.Int, 'name': pxt.String})
+
+        @pxt.query
+        def lookup_name(id: int) -> pxt.Query:
+            return names.where(names.id == id).select(names.name)
+
+        ids = pxt.create_table('ids', {'id': pxt.Int})
+        ids.add_computed_column(name=lookup_name(ids.id), stored=False)
+
+        @pxt.query
+        def lookup_id(id: int) -> pxt.Query:
+            return ids.where(ids.id == id).select(ids.name)
+
+        t = pxt.create_table('tbl', {'a': pxt.Int})
+        # the inserts don't evaluate an unstored column
+        t.add_computed_column(name=lookup_id(t.a), stored=False)
+        fault = BlockFault(filter=lambda kwargs: kwargs['op_class'] is TblOpClass.DATA_WRITE)
+        restarts: list[int | float] = []
+
+        def count_restarts() -> None:
+            restarts.append(telemetry_recorder.counter_total(telemetry_schemas.lock_set_restarts))
+
+        (
+            MultiThreadedScenario()
+            .then_run(thread_id=0, name='first write, which caches the metadata', fn=lambda: t.insert([{'a': 1}]))
+            .then_run(thread_id=0, name='count restarts', fn=count_restarts)
+            .then_inject_fault(thread_id=0, loc=FaultLocation.CATALOG_BEFORE_TBL_LOCK, fault=fault)
+            .then_run_until(
+                thread_id=0,
+                name='write to tbl, parked before it locks',
+                event=fault.reached,
+                fn=lambda: t.insert([{'a': 2}]),
+            )
+            .then_run(thread_id=1, name='drop names', fn=lambda: pxt.drop_table('names'))
+            .then_unblock(thread_id=1, fault=fault)
+            .then_run(thread_id=0, name='count restarts', fn=count_restarts)
+            .then_run(thread_id=0, name='write after the drop', fn=lambda: t.insert([{'a': 3}]))
+            .then_run(thread_id=0, name='count restarts', fn=count_restarts)
+            .execute()
+        )
+        assert restarts[1] - restarts[0] == 1
+        assert restarts[2] == restarts[1]
+        assert t.count() == 3
+
     def test_cold_cache(self, uses_db: None, telemetry_recorder: RecordingSubscriber) -> None:
         """Operations with an empty cache must lock and reach every affected table."""
         pxt.create_dir('d1')
