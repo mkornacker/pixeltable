@@ -99,6 +99,7 @@ pxt pwd                            # print it
 # projects
 pxt init                             # mark the current directory as a project root
 pxt skills install                   # give coding agents the Pixeltable skill
+pxt guide tables                     # print the agent guide to tables; 'pxt guide' lists the guides
 
 # declarative schemas
 pxt schema check  app.py          # validate the file on its own, with no target
@@ -463,6 +464,8 @@ The command downloads the skill from the repository's `main` branch and prints t
 - Claude Code started at the repository root loads a copy written in a subdirectory only once it reads a file there, so install at the root.
 - If Claude Code also has the Pixeltable plugin, both copies load, because plugin skills are namespaced: keep one.
 - Commit both directories to give every collaborator's agent the same copy, and delete them to remove the skill.
+
+The skill teaches judgment that does not change between Pixeltable releases. How the installed release behaves is in the agent guides that ship with it, one per area: tables, expressions, queries, views, indexes, UDFs, Json, providers, serving, the CLI and Cloud. `pxt guide` lists them and `pxt guide AREA` prints one. `pxt skills install` also copies them into the skill's `guides/` directory, so a reinstall after a Pixeltable upgrade brings them up to date.
 
 ### Reporting a gap
 

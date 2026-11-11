@@ -12,6 +12,7 @@ from typing import Any, Self
 import pytest
 import requests
 
+import pixeltable
 from pixeltable_cli.client import utils
 from pixeltable_cli.client.commands import skills
 
@@ -21,6 +22,16 @@ _SKILL = {
     'SKILL.md': b'---\nname: pixeltable\n---\nBuild with Pixeltable.\n',
     'references/cli.md': b'# pxt\n',
     'agents/openai.yaml': b'interface: {}\n',
+}
+
+# an install also writes the agent guides of the installed Pixeltable
+_INSTALLED = {
+    **_SKILL,
+    **{
+        f'guides/{path.name}': path.read_bytes()
+        for path in (pathlib.Path(pixeltable.__file__).parent / 'agent_guides').glob('*.md')
+        if path.name != 'README.md'
+    },
 }
 
 
@@ -122,7 +133,7 @@ class TestSkillsInstall:
         skills.run(['install'])
         assert requested == [skills.ARCHIVE_URL]
         for skills_dir in ('.claude/skills', '.agents/skills'):
-            assert _tree(project / skills_dir / 'pixeltable') == _SKILL
+            assert _tree(project / skills_dir / 'pixeltable') == _INSTALLED
         # nothing left behind from writing beside the target
         assert sorted(p.name for p in (project / '.claude/skills').iterdir()) == ['pixeltable']
 
@@ -167,7 +178,7 @@ class TestSkillsInstall:
 
         doc = _install_json(capsys, '-f')
         assert _states(doc) == {'.claude/skills/pixeltable': 'already current', '.agents/skills/pixeltable': 'replaced'}
-        assert _tree(edited) == _SKILL
+        assert _tree(edited) == _INSTALLED
 
     def test_link_at_target_is_replaced_not_followed(
         self, project: pathlib.Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -181,7 +192,7 @@ class TestSkillsInstall:
         skills.run(['install', '-f'])
         target = project / '.claude/skills/pixeltable'
         assert not target.is_symlink()
-        assert _tree(target) == _SKILL
+        assert _tree(target) == _INSTALLED
         assert _tree(elsewhere) == {'keep.md': b'not ours\n'}
 
     def test_link_inside_copy_makes_it_differ(
@@ -207,7 +218,7 @@ class TestSkillsInstall:
 
         skills.run(['install', '-f'])
         assert not link.is_symlink() and not link.exists()
-        assert _tree(project / '.agents/skills/pixeltable') == _SKILL
+        assert _tree(project / '.agents/skills/pixeltable') == _INSTALLED
         assert outside.read_bytes() == b'not ours\n'
 
     @pytest.mark.parametrize('linked', ['.agents/skills', '.claude'])
@@ -396,7 +407,7 @@ class TestSkillsInstall:
 
         monkeypatch.setattr(skills.shutil, 'rmtree', failing_rmtree)
         skills.run(['install', '-f'])
-        assert _tree(target) == _SKILL
+        assert _tree(target) == _INSTALLED
         err = capsys.readouterr().err
         assert 'could not remove the previous copy at' in err and '.pixeltable.old-' in err
 
