@@ -100,6 +100,7 @@ pxt pwd                            # print it
 pxt init                             # mark the current directory as a project root
 pxt skills install                   # give coding agents the Pixeltable skill
 pxt guide tables                     # print the agent guide to tables; 'pxt guide' lists the guides
+pxt lint                             # review the project's code against the rules in 'pxt guide review'
 
 # declarative schemas
 pxt schema check  app.py          # validate the file on its own, with no target
@@ -466,6 +467,8 @@ The command downloads the skill from the repository's `main` branch and prints t
 - Commit both directories to give every collaborator's agent the same copy, and delete them to remove the skill.
 
 The skill teaches judgment that does not change between Pixeltable releases. How the installed release behaves is in the agent guides that ship with it, one per area: tables, expressions, queries, views, indexes, UDFs, Json, providers, serving, the CLI and Cloud. `pxt guide` lists them and `pxt guide AREA` prints one. `pxt skills install` also copies them into the skill's `guides/` directory, so a reinstall after a Pixeltable upgrade brings them up to date.
+
+`pxt lint` reviews a project's Python code against the rules that `pxt guide review` prints: code that does work Pixeltable does, such as a Python loop that scores similarity or rebuilds a summary, or that uses it wrongly. With a reviewer, a separate model reads the files, and the command prints its findings; it exits 2 when there are any. `pxt lint --setup` makes the coding agent that runs it the reviewer, with a command written to the project configuration; the review then runs on that agent's account. Without a reviewer, the command prints the rules and the files for the coding agent that ran it to review.
 
 ### Reporting a gap
 

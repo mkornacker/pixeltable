@@ -38,6 +38,22 @@ from pixeltable_cli.utils import (
 
 _IS_WINDOWS = platform.system() == 'Windows'
 
+# Set by coding agents in the environment of the commands they run, as @vercel/detect-agent reads
+# them: variable -> agent. Left out: CURSOR_TRACE_ID and REPL_ID, which every Cursor terminal and
+# Replit shell carries, and the COPILOT_* settings, which a person's shell profile can export.
+AGENT_MARKERS = {
+    'CURSOR_AGENT': 'cursor',
+    'GEMINI_CLI': 'gemini',
+    'CODEX_SANDBOX': 'codex',
+    'CODEX_CI': 'codex',
+    'CODEX_THREAD_ID': 'codex',
+    'ANTIGRAVITY_AGENT': 'antigravity',
+    'AUGMENT_AGENT': 'augment',
+    'OPENCODE_CLIENT': 'opencode',
+    'CLAUDECODE': 'claude',
+    'CLAUDE_CODE': 'claude',
+}
+
 # shared exit codes for all commands
 EXIT_IN_AGREEMENT = 0
 EXIT_ERROR = 1

@@ -11,6 +11,7 @@ COMMANDS: dict[str, str] = {
     'init': 'write the project configuration here, making this the project root',
     'skills': 'install the Pixeltable skill for coding agents in this directory (install)',
     'guide': 'print an agent guide to this version of Pixeltable, or list the guides',
+    'lint': "review the project's Python code against the rules in 'pxt guide review'",
     'feedback': 'send a report to the Pixeltable team, after showing it to you (preview by default)',
     'health': 'show daemon info',
     'cd': 'set or clear the working directory prepended to relative paths',

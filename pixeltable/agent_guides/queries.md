@@ -68,6 +68,9 @@ totals = regions.select(regions.region, total=region_total(regions.region)).coll
   and `~`. A query also takes one `select()` and one `group_by()`.
 - `col is None` is a Python `bool`, which `where()` rejects; write `col == None`. `pxt guide expressions` covers the
   operators.
+- Known issue (PXT-1457): `where()` that compares an unstored computed column with a constant, as in
+  `t.where(t.flag == True)`, raises `AssertionError`. A Bool column works alone (`t.where(t.flag)`, `~t.flag`), and
+  writing the column's expression instead of the column works too.
 - `order_by()` calls accumulate: later keys break ties. Nulls sort last in ascending order and first in descending
   order.
 - Known issue (PXT-1514): `order_by()` on a UDF call does not sort, and raises `AttributeError` with `asc=False`.
@@ -108,6 +111,8 @@ totals = regions.select(regions.region, total=region_total(regions.region)).coll
 - `t.join(other, on=t.region == other.region, how='left')` joins two tables. `on=` also takes a column, matched by
   name in both tables. `how='cross'` takes no `on=`; every other join type requires it.
 - A join without `select()` returns the columns of both tables, with a suffix on a repeated name (`region_1`).
+- Known issue (PXT-1709): `join()` with a bound model on either side raises `AttributeError`; join the `pxt.get_table()`
+  handles instead.
 
 ## `@pxt.query` functions
 
@@ -116,7 +121,9 @@ totals = regions.select(regions.region, total=region_total(regions.region)).coll
 - A parameter needs a type annotation (`Cannot infer pixeltable type for parameter ...`), or a type in
   `@pxt.query(param_types=[...])`. A parameter can appear in `where()`, in `limit(n)` and in `similarity()`
   (`pxt guide indexes`).
-- Calling the function returns an expression, not rows. In `select()` or a computed column, it runs once per row.
+- Calling the function returns an expression, not rows. In `where()`, `select()` or a computed column, it runs once
+  per row, as a separate query. For a value per group over many rows, such as each email's first signup, one
+  `group_by()` query with an aggregate computes every group at once; match its rows to the table's rows by key.
   `pxt.eval_udf(region_total, 'east')` runs it on Python values and returns its result.
 - The shape of the query sets what a call returns:
 
@@ -128,6 +135,11 @@ totals = regions.select(regions.region, total=region_total(regions.region)).coll
 - `limit(n)` with a parameter returns a list, even when `n` is 1. `select(id=t.id)` returns dicts.
 - A computed column that calls a `@pxt.query` runs it when the row is inserted or its arguments change. Later
   changes to the queried table do not update it. A `select()` that calls it sees the table's current rows.
+- The query does not see the other rows of the same insert: for a query over the table itself, rows inserted
+  together do not see each other, while a row inserted later sees them.
+- Known issue (PXT-1736): a `@pxt.query` declared over models works in a model's computed column, in a route and in
+  `pxt.eval_udf()`, but fails in the `select()` or `where()` of a query in a script, with `Table was dropped` or
+  `declared over a model rather than a table`. For that use, declare the query over `pxt.get_table()` handles.
 - A computed column stores the query itself, so a `@pxt.query` defined in a notebook works in one. After a change to
   the function's body, `pxt schema diff` reports the column's expression as changed, and existing rows keep their
   values.
