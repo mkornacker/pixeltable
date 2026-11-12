@@ -40,10 +40,10 @@ guides: write what this release does, not since when.
 ## The review rules
 
 `review.md` is not a guide to an area: it contains the rules for `pxt lint`'s review of a project's code, and
-`pxt guide review` prints them. A rule describes Python that does work Pixeltable does, or uses it wrongly, and gives
-the reason, the fix and the exceptions. The rules ship with the release rather than in the skill because each fix uses
-this release's APIs and costs. Add a rule, or an exception to one, when an eval or a user report shows a new case.
-Code in a rule is indented rather than fenced, since the tests run fenced blocks.
+`pxt guide review` prints them. A rule describes Python code that redoes Pixeltable's work or uses Pixeltable wrongly,
+and gives the reason, the fix and the exceptions. The rules ship with the release rather than in the skill because each
+fix uses this release's APIs and costs. Add a rule, or an exception to one, when an eval or a user report shows a new
+case. Code in a rule is indented rather than fenced, since the tests run fenced blocks.
 
 ## When to update a guide
 

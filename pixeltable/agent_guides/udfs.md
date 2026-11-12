@@ -40,46 +40,56 @@ class Tickets(TableModel, name='tickets'):
   `Cannot infer pixeltable type for parameter 'x'` or `Cannot infer pixeltable return type`.
 - The return hint sets the column type: `str` is `String`, `PIL.Image.Image` is `Image`, `pxt.Video` is `Video`,
   a TypedDict or `list[str]` is typed Json, and `dict` is untyped Json.
-- Pixeltable records a UDF by its module path, such as `app.excerpt`, relative to the project root: the directory of
-  `pixeltable.toml`, which `pxt init` writes. The daemon and the services import the module by that path.
-- A UDF in the main module of a script raises `Defining the UDF 'f' directly in the global namespace of a Python
-  script is not allowed`. A UDF nested in a function raises `nested functions are not supported`.
-- When the module can no longer be imported, Pixeltable warns `The computed column 'preview' in table 'tickets' is no
-  longer valid`. The stored values stay readable, and an insert fails with `the column 'preview' is currently invalid`.
+- Pixeltable records a UDF by its module path relative to the project root, such as `app.excerpt`.
+- The project root is the directory of the project configuration, `pixeltable.toml`, which `pxt init` writes.
+- The daemon and the services of `pxt service update` import the UDF's module by that path (`pxt guide serving`).
+- `@pxt.udf` on a function in the main module of a script raises `Defining the UDF 'f' directly in the global
+  namespace of a Python script is not allowed`.
+- `@pxt.udf` on a function nested in another function raises `nested functions are not supported`.
+- When the UDF's module can no longer be imported, Pixeltable warns `The computed column 'preview' in table
+  'tickets' is no longer valid`.
+- The invalid column's stored values stay readable.
+- An insert into its table fails with `the column 'preview' is currently invalid`.
 - In a notebook, a UDF defined in a cell works for that session only; another process cannot load it.
 - `pxt.eval_udf(excerpt, 'a long text', n=5)` calls a UDF on Python values, without a table (`pxt guide
   expressions`).
 - `pxt.get_table()` inside a UDF raises `Catalog functions such as pxt.get_table() cannot run while a query or update
-  executes`. Known issue (PXT-1711): `add_computed_column()` accepts such a column, and the next insert or recompute
-  fails.
+  executes`.
+- Known issue (PXT-1711): `add_computed_column()` accepts a column whose UDF calls `pxt.get_table()`, and the next
+  insert or recompute fails.
 
 ## Nulls
 
-- A parameter typed `T` is non-nullable: for a null argument, Pixeltable skips the call and sets the cell to null
-  without recording an error.
+- A parameter typed without `| None`, such as `pxt.String` or `str`, is non-nullable: for a null argument,
+  Pixeltable skips the call and sets the cell to null without recording an error.
 - A nullable argument for such a parameter makes the column nullable: `preview` is `String | None` even though
   `excerpt()` returns `str`.
-- A parameter typed `T | None` receives the null, and the UDF handles it: `label` is `String`.
-- Built-in functions skip calls the same way, and an aggregate skips a row with a null argument for a non-nullable
-  `update()` parameter.
+- A parameter typed with `| None`, such as `pxt.String | None` or `str | None`, receives the null, and the UDF
+  handles it: `label` is `String`.
+- Built-in functions skip calls with null arguments the same way.
+- An aggregate skips a row with a null argument for a non-nullable `update()` parameter.
 
 ## Batched and async UDFs
 
 - With `batch_size=N`, each `Batch[...]` parameter receives a list of up to N values, and the function returns a
   list of equal length.
-- A parameter without `Batch[...]` takes a constant: a column fails with `parameter offset must be a constant value`.
+- In a batched UDF, a parameter without `Batch[...]` takes a constant; passing a column fails with `parameter offset
+  must be a constant value`.
 - Pixeltable runs an `async def` UDF as one task per row, concurrently.
-- `@pxt.udf(resource_pool='request-rate:my_api')` on an `async def` UDF limits its calls to the requests per minute
-  in the environment variable `MY_API_RATE_LIMIT` (600 by default), and retries 408, 429, 503 and 504 errors up to 3
-  times. A `[my_api]` section in `config.toml` fails with `Unrecognized option 'pixeltable.my_api'`. A UDF that is not
-  `async def` fails with `resource_pool requires an async function`.
+- `@pxt.udf(resource_pool='request-rate:my_api')` limits the calls of an `async def` UDF to the number of requests
+  per minute in the environment variable `MY_API_RATE_LIMIT`, 600 by default.
+- A UDF with `resource_pool='request-rate:my_api'` retries 408, 429, 503 and 504 errors up to 3 times.
+- Pixeltable fails with `Unrecognized option 'pixeltable.my_api'` on a `[my_api]` section in
+  `$PIXELTABLE_HOME/config.toml`.
+- `resource_pool=` on a synchronous UDF fails with `resource_pool requires an async function`.
 
 ## Media results
 
 - A UDF with an image return type returns a PIL image, and Pixeltable stores it as a file in its media store.
-- A UDF that returns `pxt.Video`, `pxt.Audio` or `pxt.Document` returns a file path or URL. Pixeltable copies a file
-  in a system temp directory, such as one from `tempfile.mkdtemp()`, into its media store, and records any other
-  local path as it is, so that file has to stay in place.
+- A UDF with a `pxt.Video`, `pxt.Audio` or `pxt.Document` return type returns a file path or URL.
+- Pixeltable copies a returned file in a system temp directory, such as one from `tempfile.mkdtemp()`, into its
+  media store.
+- Pixeltable records any other returned local path as is, so the file must stay at that path.
 - When the column sets `destination=`, Pixeltable copies the file there.
 
 ## Aggregates
@@ -102,11 +112,12 @@ by_severity = Tickets.group_by(Tickets.severity).select(Tickets.severity, avg_le
 
 - `__init__()` takes the constant arguments, `update()` takes one row's values, and the return hint of `value()`
   sets the result type.
-- Aggregates run in queries; a computed column refuses one with `aggregate functions are not supported in computed
-  columns`.
-- An aggregate declared with `requires_order_by=True`, such as `pxtf.video.make_video`, takes the ordering expression
-  as its first positional argument: `make_video(frames.pos, frames.frame, fps=25)`. `order_by=` raises
-  `order_by invalid, this function requires the first argument to be the ordering expression`.
+- Aggregates run in queries; an aggregate in a computed column raises `aggregate functions are not supported in
+  computed columns`.
+- An aggregate declared with `requires_order_by=True`, such as `pxtf.video.make_video()`, takes the ordering
+  expression as its first positional argument: `make_video(frames.pos, frames.frame, fps=25)`.
+- Passing `order_by=` to such an aggregate raises `order_by invalid, this function requires the first argument to be
+  the ordering expression`.
 
 ## Tools
 
@@ -131,14 +142,15 @@ class Assistant(TableModel, name='assistant'):
 
 - A tool's name is the UDF's name, and its description is the UDF's whole docstring; `pxt.tool()` replaces either.
 - A tool's non-nullable parameters are required.
-- `pxt.tools()` takes UDFs, `@pxt.query` functions and `pxt.retrieval_udf()` results. An aggregate raises
+- `pxt.tools()` takes UDFs, `@pxt.query` functions and `pxt.retrieval_udf()` results; passing an aggregate raises
   `Aggregator UDFs cannot be used as tools`.
 - A tool's parameters can be `String`, `Int`, `Float`, `Bool`, `UUID` or Json; a parameter of another type fails.
 - `openai`, `anthropic`, `gemini`, `bedrock` and `groq` each have an `invoke_tools()` for their own replies.
-- `invoke_tools()` returns a dict with a key for every tool: the list of results when the model called it, and null
-  when it did not, as in `{'get_weather': ['Paris: 22C, sunny'], 'shorten': None}`.
-- `pxt.retrieval_udf(table, parameters=['sku'])` returns up to `limit` rows (10 by default) whose columns equal the
-  arguments, as a list of dicts with every column; with `limit=1` it returns one dict, or null.
+- `invoke_tools()` returns a dict with one key per tool; the value is the tool's list of results, or null if the
+  model did not call the tool, as in `{'get_weather': ['Paris: 22C, sunny'], 'shorten': None}`.
+- The UDF from `pxt.retrieval_udf(table, parameters=['sku'])` returns the rows whose `sku` equals its argument, up to
+  `limit` rows (10 by default), as a list of dicts with every column.
+- With `limit=1`, the UDF from `pxt.retrieval_udf()` returns one dict, or null.
 - `pxt.retrieval_udf()` takes a `Table` from `pxt.get_table()`, not a model class.
 - `pxt.mcp_udfs(url)` connects to the MCP server at `url` over streamable HTTP and returns a UDF for each of its tools.
 

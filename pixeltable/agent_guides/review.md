@@ -1,7 +1,7 @@
 # Review
 
-Rules for reviewing a project's Python code, which `pxt lint` applies: code that does work Pixeltable does, or that
-uses it wrongly.
+Rules for reviewing a project's Python code, which `pxt lint` applies: Python code that redoes Pixeltable's work, or
+that uses Pixeltable wrongly.
 
 Each rule says what to look for, why it matters, what to write instead, and which cases are not findings. A place
 in the code is a finding only if it matches what a rule looks for and none of its exceptions.
@@ -22,8 +22,8 @@ with `pxt.eval_udf()`:
         pxtf.openai.chat_completions, messages=[{'role': 'user', 'content': prompt}], model='gpt-4o-mini'
     )
 
-Not a finding: a provider feature that no Pixeltable function covers (`pxt functions openai` lists them), called in a
-UDF.
+Not a finding: a provider feature that no Pixeltable function covers, called in a UDF. `pxt functions openai` lists the
+`openai` functions.
 
 Guide: providers
 
@@ -79,17 +79,24 @@ Look for: rows read with `collect()` and combined in Python into a value per row
 row per key, counts, rankings, totals. Also a `@pxt.query` called with a column argument in `where()` or `select()`
 to compute such a value: it runs one query per row.
 
-Why: the database computes these in one query; a Python loop moves every row out of it on each run.
+Why: a `group_by()` query computes per-group values in the database and returns one row per group. A loop recomputes
+them in Python from every row, and a `@pxt.query` called per row runs one query for each row.
 
-Instead: a `group_by()` query with an aggregate for the per-group value, matched to the rows by key, in a join or a
-lookup:
+Instead: compute the per-group value with a `group_by()` query, then look it up by key for each row in Python.
+`join()` takes a table, not a query, so the grouped query cannot be joined back to its table:
 
     first = signups.group_by(signups.email_key).select(signups.email_key, first_at=pxtf.min(signups.signed_up_at))
+    first_at = {r['email_key']: r['first_at'] for r in first.collect()}
+    rows = signups.select(signups.signup_id, signups.email_key, signups.signed_up_at).collect()
+    duplicates = [r['signup_id'] for r in rows if r['signed_up_at'] > first_at[r['email_key']]]
+
+A window aggregate, such as `pxtf.min(t.at, group_by=t.key)` in `select()`, is not the fix: in this release it
+returns a running value (`pxt guide queries`).
 
 Not a finding:
 
 - a loop that only formats or prints rows;
-- grouping done in a Pixeltable query and matched to the rows by key in Python.
+- grouping done in a Pixeltable query and looked up by key in Python.
 
 Guide: queries
 
@@ -112,7 +119,7 @@ Guide: queries, serving
 Look for: `threading`, `asyncio.create_task()`, FastAPI `BackgroundTasks`, `while True` with `sleep()`, a FastAPI
 `lifespan` hook, a jobs table, or a `status` column that code updates as work progresses.
 
-Why: Pixeltable computes a row's columns when it is inserted, records each failed cell, and a route with
+Why: Pixeltable computes a row's computed columns when it is inserted, records each failed cell, and a route with
 `background=True` returns a job URL to poll.
 
 Instead: `add_insert_route(..., background=True)`. Derive a status from the row: its computed columns have values, or

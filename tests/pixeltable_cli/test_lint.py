@@ -5,8 +5,8 @@ import os
 import pathlib
 import shlex
 import stat
+import subprocess
 import sys
-import tomllib
 
 import pytest
 
@@ -21,8 +21,10 @@ _REPORT = 'import app\n\nrows = app.Signups.collect()\nseen = set()\n'
 @pytest.fixture
 def project(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
     """A project with an application file, a script in a subdirectory, and skipped directories."""
-    for marker in [*utils.AGENT_MARKERS, lint.REVIEWER_ENV_VAR]:
+    for marker in [*utils.AGENT_MARKERS, lint.REVIEWER_ENV_VAR, 'PIXELTABLE_CONFIG']:
         monkeypatch.delenv(marker, raising=False)
+    (tmp_path / 'home').mkdir()
+    monkeypatch.setenv('PIXELTABLE_HOME', str(tmp_path / 'home'))
     (tmp_path / 'pixeltable.toml').write_text('[[pixeltable.database]]\n', encoding='utf-8')
     (tmp_path / 'app.py').write_text(_APP, encoding='utf-8')
     (tmp_path / 'reports').mkdir()
@@ -46,8 +48,42 @@ def reviewer(tmp_path: pathlib.Path, body: str) -> str:
 
 
 def answer(*findings: dict[str, object]) -> str:
-    """Return a reviewer body that prints findings as JSON, wrapped in prose and a code fence."""
-    return f'print("Here is the review:")\nprint("```json")\nprint({json.dumps({"findings": list(findings)})!r})\n'
+    """Return a reviewer body that prints findings as JSON, wrapped in prose with braces and a code fence."""
+    return (
+        'print("I checked {app.py} first.")\nprint("```json")\n'
+        f'print({json.dumps({"findings": list(findings)})!r})\nprint("```")\n'
+    )
+
+
+def pixeltable_reviewer(project: pathlib.Path) -> str | None:
+    """Return the [lint] reviewer that Pixeltable's own Config reads from project's configuration."""
+    # Pixeltable refuses a configuration file with an option it does not know
+    loaded = subprocess.run(
+        [
+            sys.executable,
+            '-c',
+            'import pathlib, sys; from pixeltable.config import Config; '
+            'config = Config({}, project_root=pathlib.Path(sys.argv[1])); '
+            'print(config.get_string_value("reviewer", section="lint"))',
+            str(project),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    reviewer = loaded.stdout.splitlines()[-1]
+    return None if reviewer == 'None' else reviewer
+
+
+def claude_on_path(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Return a PATH whose claude answers every review with no findings."""
+    bin_dir = tmp_path_factory.mktemp('bin')
+    (bin_dir / 'claude').write_text(
+        f"#!/bin/sh\ncat > /dev/null\necho '{json.dumps({'findings': []})}'\n", encoding='utf-8'
+    )
+    (bin_dir / 'claude').chmod(stat.S_IRWXU)
+    # the script needs cat
+    return os.pathsep.join([str(bin_dir), '/usr/bin', '/bin'])
 
 
 _FINDING = {'rule': 'R05', 'file': 'reports/report.py', 'line': 3, 'why': 'loops over rows', 'fix': 'use group_by()'}
@@ -102,25 +138,32 @@ class TestLint:
     def test_reviewer_precedence(
         self, project: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """--reviewer comes first, then the environment variable, then the project configuration."""
-        configured, from_env, from_flag = (
-            reviewer(project, answer({**_FINDING, 'rule': rule})) for rule in ('R01', 'R02', 'R03')
+        """--reviewer comes first, then the environment variable, the project configuration and the home
+        configuration."""
+        in_home, in_project, from_env, from_flag = (
+            reviewer(project, answer({**_FINDING, 'rule': rule})) for rule in ('R04', 'R01', 'R02', 'R03')
         )
-        with open(project / 'pixeltable.toml', 'a', encoding='utf-8') as fp:
-            fp.write(f'\n[lint]\nreviewer = {json.dumps(configured)}\n')
-        for env, argv, rule in ((None, [], 'R01'), (from_env, [], 'R02'), (from_env, ['--reviewer', from_flag], 'R03')):
-            if env is not None:
-                monkeypatch.setenv(lint.REVIEWER_ENV_VAR, env)
+
+        def reported_rule(*argv: str) -> str:
             with pytest.raises(SystemExit):
                 lint.run(['--json', *argv])
-            assert json.loads(capsys.readouterr().out)['findings'][0]['rule'] == rule
+            return json.loads(capsys.readouterr().out)['findings'][0]['rule']
+
+        (project / 'home' / 'config.toml').write_text(f'[lint]\nreviewer = {json.dumps(in_home)}\n', encoding='utf-8')
+        assert reported_rule() == 'R04'
+        with open(project / 'pixeltable.toml', 'a', encoding='utf-8') as fp:
+            fp.write(f'\n[lint]\nreviewer = {json.dumps(in_project)}\n')
+        assert reported_rule() == 'R01'
+        monkeypatch.setenv(lint.REVIEWER_ENV_VAR, from_env)
+        assert reported_rule() == 'R02'
+        assert reported_rule('--reviewer', from_flag) == 'R03'
 
     def test_reviewer_failures(self, project: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A reviewer that fails, answers without the JSON, is missing or takes too long is an error, exit 1."""
         cases = [
             (reviewer(project, 'sys.stderr.write("no credits")\nsys.exit(3)'), 'the reviewer exited 3: no credits'),
-            (reviewer(project, 'print("Looks fine to me.")'), 'did not answer with the JSON it was asked for'),
-            (reviewer(project, 'print(\'{"findings": [{"rule": "R05"}]}\')'), 'did not answer with the JSON'),
+            (reviewer(project, 'print("Looks fine to me.")'), 'has no {"findings": [...]} object: Looks fine to me.'),
+            (reviewer(project, 'print(\'{"findings": [{"rule": "R05"}]}\')'), 'has no {"findings": [...]} object'),
             ('no-such-reviewer --flag', 'the reviewer command was not found'),
         ]
         for command, message in cases:
@@ -132,81 +175,91 @@ class TestLint:
     def test_reviewer_timeout(
         self, project: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A reviewer that does not answer within the timeout is an error, exit 1."""
         monkeypatch.setattr(lint, 'REVIEWER_TIMEOUT_SECS', 1)
         with pytest.raises(SystemExit) as exc:
             lint.run(['--reviewer', reviewer(project, 'time.sleep(10)')])
         assert exc.value.code == 1
         assert 'did not answer within 1 s' in capsys.readouterr().err
 
-    def test_setup(
+    def test_agent_reviewer(
         self,
         project: pathlib.Path,
         tmp_path_factory: pytest.TempPathFactory,
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Under Claude Code, --setup writes its reviewer command to the project configuration once; under another
-        agent, or none, it is an error."""
-        with pytest.raises(SystemExit) as exc:
-            lint.run(['--setup'])
-        assert exc.value.code == 1
-        assert 'has a reviewer command for these coding agents only: claude' in capsys.readouterr().err
-
-        monkeypatch.setenv('CODEX_SANDBOX', 'seatbelt')
-        with pytest.raises(SystemExit) as exc:
-            lint.run(['--setup'])
-        assert exc.value.code == 1
-        monkeypatch.delenv('CODEX_SANDBOX')
+        """Without a configured reviewer, a run under Claude Code reviews with claude and writes it to the project
+        configuration; under another agent, none, or without claude on PATH, it prints the checklist."""
+        config_before = (project / 'pixeltable.toml').read_text(encoding='utf-8')
+        monkeypatch.setenv('PATH', str(tmp_path_factory.mktemp('empty')))
+        for agent_env in ({}, {'CODEX_SANDBOX': '1'}, {'CLAUDECODE': '1'}):
+            with monkeypatch.context() as m:
+                for name, value in agent_env.items():
+                    m.setenv(name, value)
+                lint.run([])
+            assert capsys.readouterr().out.startswith('No reviewer ran')
+        assert (project / 'pixeltable.toml').read_text(encoding='utf-8') == config_before
 
         monkeypatch.setenv('CLAUDECODE', '1')
-        monkeypatch.setenv('PATH', str(tmp_path_factory.mktemp('empty')))
-        with pytest.raises(SystemExit) as exc:
-            lint.run(['--setup'])
-        assert exc.value.code == 1
-        assert 'claude is not on PATH' in capsys.readouterr().err
-
-        bin_dir = tmp_path_factory.mktemp('bin')
-        (bin_dir / 'claude').write_text('#!/bin/sh\n', encoding='utf-8')
-        (bin_dir / 'claude').chmod(stat.S_IRWXU)
-        monkeypatch.setenv('PATH', str(bin_dir))
-        lint.run(['--setup'])
+        monkeypatch.setenv('PATH', claude_on_path(tmp_path_factory))
         command = lint.REVIEWER_PRESETS['claude']
-        assert capsys.readouterr().out == f'Wrote the reviewer to pixeltable.toml: {command}\n'
-        config = tomllib.loads((project / 'pixeltable.toml').read_text(encoding='utf-8'))
-        assert config['lint'] == {'reviewer': command}
-        lint.run(['--setup'])
-        assert capsys.readouterr().out == f'The project already has a reviewer: {command}\n'
+        lint.run([])
+        captured = capsys.readouterr()
+        assert captured.out == 'No findings.\n'
+        assert f'reviewing with {command} ([lint] reviewer in pixeltable.toml)' in captured.err
+        assert pixeltable_reviewer(project) == command
 
-    def test_setup_pyproject(
+        # the second run uses the configured reviewer
+        lint.run([])
+        assert capsys.readouterr() == ('No findings.\n', '')
+
+        (project / 'pixeltable.toml').write_text(config_before + '\n[lint]\nreviewer = "none"\n', encoding='utf-8')
+        lint.run([])
+        assert capsys.readouterr().out.startswith('No reviewer ran')
+
+    def test_agent_reviewer_config_files(
         self,
-        tmp_path: pathlib.Path,
         tmp_path_factory: pytest.TempPathFactory,
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """In a project configured in pyproject.toml, --setup writes [tool.pixeltable.lint], and a review uses it."""
-        for marker in [*utils.AGENT_MARKERS, lint.REVIEWER_ENV_VAR]:
+        """A pyproject.toml with a [tool.pixeltable.pixeltable] table gets [tool.pixeltable.lint]. One with the settings
+        of [pixeltable] directly under [tool.pixeltable], as 'pxt init' writes it, has no place for [lint], and neither
+        has a directory outside a project: there the review runs without writing a configuration."""
+        for marker in [*utils.AGENT_MARKERS, lint.REVIEWER_ENV_VAR, 'PIXELTABLE_CONFIG']:
             monkeypatch.delenv(marker, raising=False)
-        (tmp_path / 'pyproject.toml').write_text('[project]\nname = "shop"\n\n[tool.pixeltable]\n', encoding='utf-8')
-        (tmp_path / 'app.py').write_text(_APP, encoding='utf-8')
-        monkeypatch.chdir(tmp_path)
-        bin_dir = tmp_path_factory.mktemp('bin')
-        (bin_dir / 'claude').write_text(
-            f"#!/bin/sh\ncat > /dev/null\necho '{json.dumps({'findings': []})}'\n", encoding='utf-8'
-        )
-        (bin_dir / 'claude').chmod(stat.S_IRWXU)
-        # the script needs cat
-        monkeypatch.setenv('PATH', os.pathsep.join([str(bin_dir), '/usr/bin', '/bin']))
+        monkeypatch.setenv('PIXELTABLE_HOME', str(tmp_path_factory.mktemp('home')))
         monkeypatch.setenv('CLAUDECODE', '1')
-        lint.run(['--setup', '--json'])
-        assert json.loads(capsys.readouterr().out) == {
-            'reviewer': lint.REVIEWER_PRESETS['claude'],
-            'written': str(tmp_path / 'pyproject.toml'),
-        }
-        config = tomllib.loads((tmp_path / 'pyproject.toml').read_text(encoding='utf-8'))
-        assert config['tool']['pixeltable']['lint'] == {'reviewer': lint.REVIEWER_PRESETS['claude']}
+        monkeypatch.setenv('PATH', claude_on_path(tmp_path_factory))
+        command = lint.REVIEWER_PRESETS['claude']
+        this_run_only = (
+            f'pxt lint: reviewing with {command} (this run only). Each review runs that model on your account; '
+            '[lint] reviewer = "none" in the project configuration turns it off.\n'
+        )
+
+        nested = tmp_path_factory.mktemp('nested')
+        (nested / 'pyproject.toml').write_text(
+            '[project]\nname = "shop"\n\n[[tool.pixeltable.pixeltable.database]]\n', encoding='utf-8'
+        )
+        (nested / 'app.py').write_text(_APP, encoding='utf-8')
+        monkeypatch.chdir(nested)
         lint.run([])
-        assert capsys.readouterr().out == 'No findings.\n'
+        assert '([lint] reviewer in pyproject.toml)' in capsys.readouterr().err
+        assert pixeltable_reviewer(nested) == command
+
+        for flat_layout in ('[[tool.pixeltable.database]]\n', None):
+            project = tmp_path_factory.mktemp('flat')
+            if flat_layout is not None:
+                (project / 'pyproject.toml').write_text(f'[project]\nname = "shop"\n\n{flat_layout}', encoding='utf-8')
+            (project / 'script.py').write_text(_APP, encoding='utf-8')
+            files_before = {path.name: path.read_text(encoding='utf-8') for path in project.iterdir()}
+            monkeypatch.chdir(project)
+            lint.run([])
+            assert capsys.readouterr() == ('No findings.\n', this_run_only)
+            assert {path.name: path.read_text(encoding='utf-8') for path in project.iterdir()} == files_before
+            if flat_layout is not None:
+                assert pixeltable_reviewer(project) is None
 
     def test_usage_errors(
         self, project: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

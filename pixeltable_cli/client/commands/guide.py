@@ -41,6 +41,6 @@ def run(argv: list[str]) -> None:
 
 
 def summary(path: pathlib.Path) -> str:
-    """The first line of a guide after its title."""
+    """Return the first nonblank line after the guide's title."""
     lines = path.read_text(encoding='utf-8').splitlines()
     return next(line for line in lines[1:] if line.strip() != '')

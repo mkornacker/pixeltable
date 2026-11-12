@@ -12,18 +12,19 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tomllib
 from typing import Any, NoReturn
 
-from pixeltable_cli.utils import PROJECT_CONFIG_FILE, PYPROJECT_FILE, find_project_root, parse_toml
+from pixeltable_cli.utils import _resolve_pixeltable_config_file, _resolve_pixeltable_home, find_project_root
 
 from ..parser import Parser
+from ..project_config import find_project_config, get_option, set_option
 from ..utils import AGENT_MARKERS, EXIT_CHANGES_PENDING, EXIT_ERROR, plural, print_error_document
 from .guide import guide_paths
 
 # by coding agent: a command that answers a prompt from stdin, with read-only tools
 REVIEWER_PRESETS = {'claude': 'claude -p --model sonnet --tools Read,Grep,Glob --allowedTools Read,Grep,Glob'}
-REVIEWER_ENV_VAR = 'PXT_LINT_REVIEWER'
+# env_var_name('lint', 'reviewer') in pixeltable.config
+REVIEWER_ENV_VAR = 'LINT_REVIEWER'
 REVIEWER_TIMEOUT_SECS = 600
 
 SKIPPED_DIRS = {'__pycache__', 'node_modules', 'site-packages', 'venv', 'build', 'dist'}
@@ -33,29 +34,32 @@ EPILOG = f"""\
 Examples:
   pxt lint                           # every Python file of the project
   pxt lint report.py app.py          # these files only
-  pxt lint --setup                   # make your coding agent the reviewer
   pxt lint --reviewer none           # print the rules and the files, to review them yourself
 
 Exit codes:
   0  no findings, or no reviewer: the command printed the rules and the files for you to review
-  1  error: bad arguments, no reviewer for --setup, or the reviewer failed or did not answer as asked
+  1  error: bad arguments, or the reviewer failed or did not answer as asked
   2  findings: fix each one, or say why it does not apply
 
 Notes:
   'pxt guide review' prints the rules. A reviewer is a command that reads a prompt on stdin and answers on
   stdout, such as a coding agent's non-interactive mode. --reviewer sets it for one run; otherwise
-  ${REVIEWER_ENV_VAR}, then 'reviewer' in the [lint] section of the project configuration, which --setup
-  writes. Without a reviewer, the command prints the rules and the files for the coding agent that runs it.
+  ${REVIEWER_ENV_VAR}, then [lint] reviewer in the project configuration, then in
+  $PIXELTABLE_HOME/config.toml. Without any of these, pxt lint reviews with the coding agent that runs it,
+  if it has a command for that agent ({', '.join(REVIEWER_PRESETS)}), and writes the command to the project
+  configuration. reviewer = "none" turns the review off: the command then prints the rules and the files
+  for the coding agent that runs it.
   A review sends the files to the reviewer's model, on the reviewer's account."""
 
 PROMPT = """\
 You review the Python code of a project that uses Pixeltable {version}. Report only places that match one of the
-rules below: code that does in Python what Pixeltable does, or that uses Pixeltable wrongly. Do not review style,
-naming or general Python quality.
+rules below: Python code that redoes Pixeltable's work, or that uses Pixeltable wrongly. Do not review style, naming
+or general Python quality.
 
-A place is a finding only if it matches a rule's "Look for" and none of its "Not a finding" cases. When a finding's
-fix depends on how Pixeltable behaves, check it before you report it: the guides to this release are in
-{guides_dir}, and the installed package is in {package_dir}. You may read files; change nothing.
+A place is a finding only if it matches a rule's "Look for" and none of its "Not a finding" cases. Base the fix on
+the rule's "Instead", applied to this code. Before you name any other construct in a fix, confirm in the
+guides to this release ({guides_dir}) or in the installed package ({package_dir}) that it works; if no fix
+works in this release, say so in "fix". You may read files; change nothing.
 
 <rules>
 {rules}
@@ -69,9 +73,8 @@ Answer with one JSON object and nothing else:
 a valid answer."""
 
 CHECKLIST = """\
-No reviewer is configured, so review these files yourself against the rules below. For each place that matches a
-rule, fix it, or say in your report why it does not apply. 'pxt lint --setup' has a separate model review them
-instead; ask the user first, since it runs that model on their account.
+No reviewer ran, so review these files yourself against the rules below. For each place that matches a rule, fix
+it, or say in your report why it does not apply.
 
 Files:
 {files}
@@ -92,23 +95,17 @@ def run(argv: list[str]) -> None:
     parser.add_argument(
         '--reviewer', metavar='COMMAND', help="the reviewer command for this run; 'none' for no reviewer"
     )
-    parser.add_argument(
-        '--setup', action='store_true', help='make the coding agent that runs this command the reviewer'
-    )
     parser.add_argument('--json', action='store_true', dest='as_json', help='Emit JSON output')
     args = parser.parse_args(argv)
 
     root = find_project_root(pathlib.Path.cwd()) or pathlib.Path.cwd()
-    if args.setup:
-        _setup(root, args.as_json)
-        return
     for path in args.paths:
         if not os.path.exists(path):
             parser.error(f'{path} does not exist')
     files = _python_files(root, [pathlib.Path(p) for p in args.paths])
     if len(files) == 0:
         _fail('there are no Python files to review', 'NO_FILES', args.as_json)
-    sources = {_display(path, root): path.read_text(encoding='utf-8', errors='replace') for path in files}
+    sources = {_relative_to_root(path, root): path.read_text(encoding='utf-8', errors='replace') for path in files}
     if sum(len(source) for source in sources.values()) > MAX_SOURCE_CHARS:
         _fail(
             f'the files have more than {MAX_SOURCE_CHARS} characters; name the files to review',
@@ -118,28 +115,14 @@ def run(argv: list[str]) -> None:
 
     rules_path = guide_paths()['review']
     reviewer = args.reviewer if args.reviewer is not None else _configured_reviewer(root)
+    if reviewer is None:
+        reviewer = _set_up_agent_reviewer(root)
     if reviewer is None or reviewer == 'none':
         _print_checklist(list(sources), rules_path, args.as_json)
         return
 
     findings = _review(reviewer, sources, rules_path, root, args.as_json)
-    rules = _rule_headings(rules_path)
-    if args.as_json:
-        print(json.dumps({'findings': findings}, indent=2))
-    else:
-        for f in findings:
-            title, guide = rules.get(f['rule'], ('', ''))
-            location = f['file'] if f.get('line') is None else f'{f["file"]}:{f["line"]}'
-            print(f'{location}: {f["rule"]} {title}'.rstrip())
-            print(f'    Why: {f["why"]}')
-            print(f'    Fix: {f["fix"]}')
-            if guide != '':
-                print(f'    Guide: {guide}')
-        print(
-            'No findings.'
-            if len(findings) == 0
-            else f'{plural(len(findings), "finding")}: fix each, or say why it does not apply.'
-        )
+    _print_findings(findings, rules_path, args.as_json)
     if len(findings) > 0:
         sys.exit(EXIT_CHANGES_PENDING)
 
@@ -157,7 +140,7 @@ def _python_files(root: pathlib.Path, paths: list[pathlib.Path]) -> list[pathlib
     return list(dict.fromkeys(files))
 
 
-def _display(path: pathlib.Path, root: pathlib.Path) -> str:
+def _relative_to_root(path: pathlib.Path, root: pathlib.Path) -> str:
     resolved = path.resolve()
     return str(resolved.relative_to(root.resolve())) if resolved.is_relative_to(root.resolve()) else str(path)
 
@@ -165,65 +148,52 @@ def _display(path: pathlib.Path, root: pathlib.Path) -> str:
 def _configured_reviewer(root: pathlib.Path) -> str | None:
     if os.environ.get(REVIEWER_ENV_VAR, '') != '':
         return os.environ[REVIEWER_ENV_VAR]
-    section = _lint_section(root)
-    reviewer = section.get('reviewer') if section is not None else None
-    return reviewer if isinstance(reviewer, str) and reviewer != '' else None
+    home_config = pathlib.Path(_resolve_pixeltable_config_file(_resolve_pixeltable_home()))
+    for config_file in (find_project_config(root), home_config):
+        reviewer = get_option(config_file, 'lint', 'reviewer') if config_file is not None else None
+        if isinstance(reviewer, str) and reviewer != '':
+            return reviewer
+    return None
 
 
-def _lint_section(root: pathlib.Path) -> dict[str, Any] | None:
-    if (root / PROJECT_CONFIG_FILE).is_file():
-        section = parse_toml(root / PROJECT_CONFIG_FILE).get('lint')
-    elif (root / PYPROJECT_FILE).is_file():
-        section = parse_toml(root / PYPROJECT_FILE).get('tool', {}).get('pixeltable', {}).get('lint')
-    else:
-        return None
-    return section if isinstance(section, dict) else None
+def _set_up_agent_reviewer(root: pathlib.Path) -> str | None:
+    """Return the reviewer command for the coding agent that runs pxt lint, and write it to the project configuration.
 
-
-def _setup(root: pathlib.Path, as_json: bool) -> None:
-    configured = _lint_section(root)
-    if configured is not None and isinstance(configured.get('reviewer'), str):
-        _report_setup(configured['reviewer'], None, as_json)
-        return
+    Returns None if no agent with a preset runs pxt lint, or if the preset's executable is not on PATH.
+    """
     agent = next((name for marker, name in AGENT_MARKERS.items() if os.environ.get(marker, '') != ''), None)
-    if agent is None or agent not in REVIEWER_PRESETS:
-        known = ', '.join(sorted(REVIEWER_PRESETS))
-        _fail(
-            f'pxt lint has a reviewer command for these coding agents only: {known}. Set {REVIEWER_ENV_VAR} to a '
-            'command that reads a prompt on stdin and answers on stdout, or pass --reviewer.',
-            'NO_REVIEWER',
-            as_json,
-        )
-    command = REVIEWER_PRESETS[agent]
-    executable = shlex.split(command)[0]
-    if shutil.which(executable) is None:
-        _fail(f'{executable} is not on PATH, so it cannot review', 'NO_REVIEWER', as_json)
-    if (root / PROJECT_CONFIG_FILE).is_file():
-        config_file, header = root / PROJECT_CONFIG_FILE, '[lint]'
-    elif (root / PYPROJECT_FILE).is_file():
-        config_file, header = root / PYPROJECT_FILE, '[tool.pixeltable.lint]'
-    else:
-        _fail("no project configuration here; run 'pxt init' to write one", 'NO_PROJECT', as_json)
-    text = config_file.read_text(encoding='utf-8')
-    separator = '' if text == '' else '\n' if text.endswith('\n') else '\n\n'
-    # json.dumps() of an ASCII string is a valid TOML basic string
-    addition = f'{separator}{header}\nreviewer = {json.dumps(command)}\n'
-    try:
-        tomllib.loads(text + addition)
-    except tomllib.TOMLDecodeError as e:
-        _fail(f'{config_file.name} does not parse with {header} appended: {e}', 'INVALID_CONFIGURATION', as_json)
-    with open(config_file, 'a', encoding='utf-8') as fp:
-        fp.write(addition)
-    _report_setup(command, config_file, as_json)
+    command = REVIEWER_PRESETS.get(agent) if agent is not None else None
+    if command is None or shutil.which(shlex.split(command)[0]) is None:
+        return None
+    config_file = find_project_config(root)
+    saved = config_file is not None and set_option(config_file, 'lint', 'reviewer', command)
+    where = f'[lint] reviewer in {config_file.name}' if saved and config_file is not None else 'this run only'
+    print(
+        f'pxt lint: reviewing with {command} ({where}). Each review runs that model on your account; '
+        '[lint] reviewer = "none" in the project configuration turns it off.',
+        file=sys.stderr,
+    )
+    return command
 
 
-def _report_setup(command: str, written: pathlib.Path | None, as_json: bool) -> None:
+def _print_findings(findings: list[dict[str, Any]], rules_path: pathlib.Path, as_json: bool) -> None:
     if as_json:
-        print(json.dumps({'reviewer': command, 'written': None if written is None else str(written)}, indent=2))
-    elif written is None:
-        print(f'The project already has a reviewer: {command}')
-    else:
-        print(f'Wrote the reviewer to {written.name}: {command}')
+        print(json.dumps({'findings': findings}, indent=2))
+        return
+    rules = _rule_headings(rules_path)
+    for f in findings:
+        title, guide = rules.get(f['rule'], ('', ''))
+        location = f['file'] if f.get('line') is None else f'{f["file"]}:{f["line"]}'
+        print(f'{location}: {f["rule"]} {title}'.rstrip())
+        print(f'    Why: {f["why"]}')
+        print(f'    Fix: {f["fix"]}')
+        if guide != '':
+            print(f'    Guide: {guide}')
+    print(
+        'No findings.'
+        if len(findings) == 0
+        else f'{plural(len(findings), "finding")}: fix each, or say why it does not apply.'
+    )
 
 
 def _print_checklist(files: list[str], rules_path: pathlib.Path, as_json: bool) -> None:
@@ -276,7 +246,7 @@ def _review(
     findings = _parse_findings(result.stdout)
     if findings is None:
         _fail(
-            f'the reviewer did not answer with the JSON it was asked for: {result.stdout.strip()[:300]}',
+            f'the reviewer\'s answer has no {{"findings": [...]}} object: {result.stdout.strip()[:300]}',
             'REVIEWER_FAILED',
             as_json,
         )
@@ -285,14 +255,16 @@ def _review(
 
 def _parse_findings(answer: str) -> list[dict[str, Any]] | None:
     """Parse the findings out of the reviewer's answer; None if the answer has no valid {"findings": [...]} object."""
-    # a model may wrap the object in prose or a code fence
-    start, end = answer.find('{'), answer.rfind('}')
-    if start < 0 or end < start:
-        return None
-    try:
-        parsed = json.loads(answer[start : end + 1])
-    except ValueError:
-        return None
+    # a model may wrap the object in prose or a code fence, and the prose may contain braces
+    decoder = json.JSONDecoder()
+    parsed: Any = None
+    for start in (i for i, ch in enumerate(answer) if ch == '{'):
+        try:
+            parsed, _ = decoder.raw_decode(answer, start)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get('findings'), list):
+            break
     if not isinstance(parsed, dict) or not isinstance(parsed.get('findings'), list):
         return None
     findings: list[dict[str, Any]] = []
