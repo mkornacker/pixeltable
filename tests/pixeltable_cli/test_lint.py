@@ -90,9 +90,12 @@ _FINDING = {'rule': 'R05', 'file': 'reports/report.py', 'line': 3, 'why': 'loops
 
 
 class TestLint:
-    def test_checklist(self, project: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_checklist(
+        self, project: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Without a reviewer, the command prints the project's Python files and the rules, and exits 0; named paths
-        restrict the files, and '--reviewer none' prints the checklist even with a reviewer configured."""
+        restrict the files, and LINT_REVIEWER=none prints the checklist even with a reviewer in the project
+        configuration."""
         rules = guide_paths()['review'].read_text(encoding='utf-8')
         lint.run([])
         out = capsys.readouterr().out
@@ -105,14 +108,18 @@ class TestLint:
 
         with open(project / 'pixeltable.toml', 'a', encoding='utf-8') as fp:
             fp.write(f'\n[lint]\nreviewer = {json.dumps(reviewer(project, "sys.exit(9)"))}\n')
-        lint.run(['app.py', '--reviewer', 'none'])
+        monkeypatch.setenv(lint.REVIEWER_ENV_VAR, 'none')
+        lint.run(['app.py'])
         assert 'Files:\n  app.py\n\n' in capsys.readouterr().out
 
-    def test_review(self, project: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_review(
+        self, project: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A reviewer gets the rules and the numbered lines of each file, and the command prints its findings with the
         rule's title and guide, and exits 2; with no findings, it exits 0."""
         with pytest.raises(SystemExit) as exc:
-            lint.run(['--reviewer', reviewer(project, answer(_FINDING))])
+            monkeypatch.setenv(lint.REVIEWER_ENV_VAR, reviewer(project, answer(_FINDING)))
+            lint.run([])
         assert exc.value.code == 2
         prompt = (project / 'prompt.txt').read_text(encoding='utf-8')
         assert guide_paths()['review'].read_text(encoding='utf-8') in prompt
@@ -128,25 +135,26 @@ class TestLint:
         )
 
         with pytest.raises(SystemExit) as exc:
-            lint.run(['--json', '--reviewer', reviewer(project, answer(_FINDING, {**_FINDING, 'line': 'n/a'}))])
+            monkeypatch.setenv(lint.REVIEWER_ENV_VAR, reviewer(project, answer(_FINDING, {**_FINDING, 'line': 'n/a'})))
+            lint.run(['--json'])
         assert exc.value.code == 2
         assert json.loads(capsys.readouterr().out) == {'findings': [_FINDING, {**_FINDING, 'line': None}]}
 
-        lint.run(['--reviewer', reviewer(project, answer())])
+        monkeypatch.setenv(lint.REVIEWER_ENV_VAR, reviewer(project, answer()))
+        lint.run([])
         assert capsys.readouterr().out == 'No findings.\n'
 
     def test_reviewer_precedence(
         self, project: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """--reviewer comes first, then the environment variable, the project configuration and the home
-        configuration."""
-        in_home, in_project, from_env, from_flag = (
-            reviewer(project, answer({**_FINDING, 'rule': rule})) for rule in ('R04', 'R01', 'R02', 'R03')
+        """The environment variable comes first, then the project configuration and the home configuration."""
+        in_home, in_project, from_env = (
+            reviewer(project, answer({**_FINDING, 'rule': rule})) for rule in ('R04', 'R01', 'R02')
         )
 
-        def reported_rule(*argv: str) -> str:
+        def reported_rule() -> str:
             with pytest.raises(SystemExit):
-                lint.run(['--json', *argv])
+                lint.run(['--json'])
             return json.loads(capsys.readouterr().out)['findings'][0]['rule']
 
         (project / 'home' / 'config.toml').write_text(f'[lint]\nreviewer = {json.dumps(in_home)}\n', encoding='utf-8')
@@ -156,9 +164,10 @@ class TestLint:
         assert reported_rule() == 'R01'
         monkeypatch.setenv(lint.REVIEWER_ENV_VAR, from_env)
         assert reported_rule() == 'R02'
-        assert reported_rule('--reviewer', from_flag) == 'R03'
 
-    def test_reviewer_failures(self, project: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_reviewer_failures(
+        self, project: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A reviewer that fails, answers without the JSON, is missing or takes too long is an error, exit 1."""
         cases = [
             (reviewer(project, 'sys.stderr.write("no credits")\nsys.exit(3)'), 'the reviewer exited 3: no credits'),
@@ -167,8 +176,9 @@ class TestLint:
             ('no-such-reviewer --flag', 'the reviewer command was not found'),
         ]
         for command, message in cases:
+            monkeypatch.setenv(lint.REVIEWER_ENV_VAR, command)
             with pytest.raises(SystemExit) as exc:
-                lint.run(['--reviewer', command])
+                lint.run([])
             assert exc.value.code == 1
             assert message in capsys.readouterr().err
 
@@ -177,8 +187,9 @@ class TestLint:
     ) -> None:
         """A reviewer that does not answer within the timeout is an error, exit 1."""
         monkeypatch.setattr(lint, 'REVIEWER_TIMEOUT_SECS', 1)
+        monkeypatch.setenv(lint.REVIEWER_ENV_VAR, reviewer(project, 'time.sleep(10)'))
         with pytest.raises(SystemExit) as exc:
-            lint.run(['--reviewer', reviewer(project, 'time.sleep(10)')])
+            lint.run([])
         assert exc.value.code == 1
         assert 'did not answer within 1 s' in capsys.readouterr().err
 

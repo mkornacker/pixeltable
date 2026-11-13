@@ -34,7 +34,6 @@ EPILOG = f"""\
 Examples:
   pxt lint                           # every Python file of the project
   pxt lint report.py app.py          # these files only
-  pxt lint --reviewer none           # print the rules and the files, to review them yourself
 
 Exit codes:
   0  no findings, or no reviewer: the command printed the rules and the files for you to review
@@ -43,12 +42,12 @@ Exit codes:
 
 Notes:
   'pxt guide review' prints the rules. A reviewer is a command that reads a prompt on stdin and answers on
-  stdout, such as a coding agent's non-interactive mode. --reviewer sets it for one run; otherwise
-  ${REVIEWER_ENV_VAR}, then [lint] reviewer in the project configuration, then in
-  $PIXELTABLE_HOME/config.toml. Without any of these, pxt lint reviews with the coding agent that runs it,
-  if it has a command for that agent ({', '.join(REVIEWER_PRESETS)}), and writes the command to the project
-  configuration. reviewer = "none" turns the review off: the command then prints the rules and the files
-  for the coding agent that runs it.
+  stdout, such as a coding agent's non-interactive mode. The config option [lint] reviewer sets it, read from
+  ${REVIEWER_ENV_VAR}, then the project configuration, then $PIXELTABLE_HOME/config.toml. Without it, pxt lint
+  reviews with the coding agent that runs it, if pxt lint has a command for that agent
+  ({', '.join(REVIEWER_PRESETS)}), and writes the command to the project configuration.
+  reviewer = "none" turns the review off: the command then prints the rules and the files for the coding
+  agent that runs it.
   A review sends the files to the reviewer's model, on the reviewer's account."""
 
 PROMPT = """\
@@ -92,9 +91,6 @@ def run(argv: list[str]) -> None:
     parser.add_argument(
         'paths', nargs='*', metavar='PATH', help='files or directories to review (default: the project)'
     )
-    parser.add_argument(
-        '--reviewer', metavar='COMMAND', help="the reviewer command for this run; 'none' for no reviewer"
-    )
     parser.add_argument('--json', action='store_true', dest='as_json', help='Emit JSON output')
     args = parser.parse_args(argv)
 
@@ -114,7 +110,7 @@ def run(argv: list[str]) -> None:
         )
 
     rules_path = guide_paths()['review']
-    reviewer = args.reviewer if args.reviewer is not None else _configured_reviewer(root)
+    reviewer = _configured_reviewer(root)
     if reviewer is None:
         reviewer = _set_up_agent_reviewer(root)
     if reviewer is None or reviewer == 'none':

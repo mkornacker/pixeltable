@@ -12,19 +12,26 @@ from typing import Mapping
 
 import pydantic
 
-from pixeltable.config import VAR_ENV_PREFIX, Config, env_var_name
+from pixeltable.config import VAR_ENV_PREFIX, Config, ConfigKey, env_var_name
 from pixeltable_cli.client.utils import session_is_live
 from pixeltable_cli.models import InFlightRequest, Method
 from pixeltable_cli.utils import value_fingerprint
 
 _logger = logging.getLogger(__name__)
 
+_CLIENT_SECTIONS = ('lint',)
+
+
+def daemon_env_keys() -> list[ConfigKey]:
+    """Config.env_keys() relevant to the daemon."""
+    return [ck for ck in Config.get().env_keys() if ck.section not in _CLIENT_SECTIONS]
+
 
 def config_fingerprint() -> dict[str, str]:
     """Fingerprints of the config values relevant to the daemon, as {env var name: hash}."""
     config = Config.get()
     out: dict[str, str] = {}
-    for ck in config.env_keys():
+    for ck in daemon_env_keys():
         value: str | None
         # settings from [[pixeltable.database]] are read per command
         if (ck.section, ck.key) == ('pixeltable', 'database'):
@@ -41,7 +48,7 @@ def compare_env_values(other: Mapping[str, str], mine: Mapping[str, str]) -> tup
 
     Returns (set for other but not in mine, resolved differently in mine)
     """
-    known = {env_var_name(ck.section, ck.key) for ck in Config.get().env_keys()}
+    known = {env_var_name(ck.section, ck.key) for ck in daemon_env_keys()}
     relevant = {name: h for name, h in other.items() if name.startswith(VAR_ENV_PREFIX) or name in known}
     missing = sorted(name for name in relevant if name not in mine)
     differing = sorted(name for name, h in relevant.items() if name in mine and mine[name] != h)
@@ -138,8 +145,8 @@ class DaemonState:
         self._env_fingerprint = config_fingerprint()
 
     def known_env_vars(self) -> list[str]:
-        """Every env var pixeltable reads config from, set or not."""
-        return sorted(env_var_name(ck.section, ck.key) for ck in Config.get().env_keys())
+        """The names of the daemon's config env vars, set or not."""
+        return sorted(env_var_name(ck.section, ck.key) for ck in daemon_env_keys())
 
     def changed_env_vars(self, current: Mapping[str, str]) -> list[str]:
         """The env vars whose value in current no longer matches the recorded _env_fingerprint."""
