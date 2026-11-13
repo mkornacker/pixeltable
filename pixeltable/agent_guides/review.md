@@ -6,6 +6,11 @@ that uses Pixeltable wrongly.
 Each rule says what to look for, why it matters, what to write instead, and which cases are not findings. A place
 in the code is a finding only if it matches what a rule looks for and none of its exceptions.
 
+A spec or design document that describes the flagged design does not make it an exception: it describes how the
+project would be built without Pixeltable. A spec fixes only its external contracts, such as the format of an input
+file and the fields of an API response or a report. Store the data in its Pixeltable form, and convert it at that
+boundary.
+
 ## R01 A provider's SDK called directly
 
 Look for: a provider's client, such as `openai.OpenAI()`, `anthropic.Anthropic()` or `genai.Client()`, created in the
@@ -189,7 +194,8 @@ filtering or grouping kept inside a Json column, or a media file's path stored a
 Why: strings sort and compare as text, every reader parses the list again, and a field inside Json is not a column.
 
 Instead: `pxt.Timestamp` or `pxt.Date`, `pxt.Json[list[str]]`, a typed column for each value used in a query, and
-`pxt.Image`, `pxt.Video`, `pxt.Audio` or `pxt.Document` for media.
+`pxt.Image`, `pxt.Video`, `pxt.Audio` or `pxt.Document` for media. Convert an input format, such as a comma-separated
+field in a CSV file, in the code that loads it.
 
 Guide: tables
 
