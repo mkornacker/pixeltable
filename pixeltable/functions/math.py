@@ -126,7 +126,8 @@ def sqrt(self: float) -> float:
 
 @sqrt.to_sql
 def _(self: sql.ColumnElement) -> sql.ColumnElement:
-    return sql.func.sqrt(self)
+    # without type_, SQLAlchemy leaves the element's type as NullType
+    return sql.func.sqrt(self, type_=sql.Float)
 
 
 @pxt.udf(is_method=True)
@@ -141,7 +142,8 @@ def exp(self: float) -> float:
 
 @exp.to_sql
 def _(self: sql.ColumnElement) -> sql.ColumnElement:
-    return sql.func.exp(self)
+    # without type_, SQLAlchemy leaves the element's type as NullType
+    return sql.func.exp(self, type_=sql.Float)
 
 
 @pxt.udf(is_method=True)
@@ -156,7 +158,8 @@ def log(self: float) -> float:
 
 @log.to_sql
 def _(self: sql.ColumnElement) -> sql.ColumnElement:
-    return sql.func.ln(self)
+    # without type_, SQLAlchemy leaves the element's type as NullType
+    return sql.func.ln(self, type_=sql.Float)
 
 
 @pxt.udf(is_method=True)
@@ -171,7 +174,8 @@ def log10(self: float) -> float:
 
 @log10.to_sql
 def _(self: sql.ColumnElement) -> sql.ColumnElement:
-    return sql.func.log10(self)
+    # without type_, SQLAlchemy leaves the element's type as NullType
+    return sql.func.log10(self, type_=sql.Float)
 
 
 @pxt.udf(is_method=True)
@@ -246,7 +250,7 @@ def _(self: sql.ColumnElement) -> sql.ColumnElement | None:
         return sql.cast(self, sql.BigInteger)
     if isinstance(self.type, sql.Float):
         return sql.cast(sql.func.trunc(self), sql.BigInteger)
-    # trunc() rejects a BOOLEAN and converts a BIGINT to DOUBLE PRECISION, which is inexact above 2**53
+    # trunc() rejects a BOOLEAN and converts an untyped BIGINT to DOUBLE PRECISION, which is inexact above 2**53
     return None
 
 
